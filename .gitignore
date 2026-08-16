@@ -1,0 +1,24 @@
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+*$py.class
+*.sqlite3
+tracker.db
+.env
+
+# Node & Frontend
+node_modules/
+frontend/node_modules/
+dist/
+frontend/dist/
+.vite/
+frontend/.vite/
+
+# Logs & OS
+*.log
+.DS_Store
+Thumbs.db
+
+# Tools
+tools/
