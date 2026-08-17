@@ -8,6 +8,12 @@ echo "=================================================================="
 echo " Starting HealthPulse (Multi-User, Biometrics, Async Gemini)     "
 echo "=================================================================="
 
+# Ensure previous stale processes on ports 5000 and 5173 are stopped cleanly
+pkill -f "$PROJECT_DIR/backend/app.py" 2>/dev/null || true
+fuser -k 5000/tcp 2>/dev/null || true
+fuser -k 5173/tcp 2>/dev/null || true
+sleep 0.5
+
 # Check for Node.js / npm
 if ! command -v node &> /dev/null; then
   if [ -d "$PROJECT_DIR/../tools/nodejs/bin" ]; then
@@ -74,20 +80,21 @@ cleanup() {
   echo ""
   echo "Shutting down servers..."
   kill $(jobs -p) 2>/dev/null || true
+  pkill -f "$PROJECT_DIR/backend/app.py" 2>/dev/null || true
   exit 0
 }
 trap cleanup SIGINT SIGTERM EXIT
 
 # 3. Start Flask API Backend
-echo "🚀 Starting Flask API backend..."
+echo "🚀 Starting Flask API backend on http://127.0.0.1:5000..."
 "$VENV_PYTHON" "$PROJECT_DIR/backend/app.py" &
 FLASK_PID=$!
 
-# Wait briefly for Flask
+# Wait briefly for Flask to bind port 5000
 sleep 1.5
 
 # 4. Start Vite React Frontend
-echo "🚀 Starting Vite React frontend..."
+echo "🚀 Starting Vite React frontend on http://localhost:5173..."
 cd "$PROJECT_DIR/frontend"
 npm run dev -- --host &
 VITE_PID=$!
@@ -96,7 +103,7 @@ echo ""
 echo "=================================================================="
 echo " 🎉 HealthPulse is LIVE!"
 echo " 👉 Web App:     http://localhost:5173"
-echo " 👉 Backend API: http://localhost:5000 (HTTPS enabled if certs active)"
+echo " 👉 Backend API: http://localhost:5000"
 echo " Press Ctrl+C to stop all servers."
 echo "=================================================================="
 echo ""

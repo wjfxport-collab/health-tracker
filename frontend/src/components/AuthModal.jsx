@@ -39,9 +39,16 @@ export default function AuthModal({ isOpen, onClose, onAuthSuccess }) {
         })
       });
 
-      const data = await res.json();
-      if (!data.success) {
-        throw new Error(data.error || 'Authentication failed.');
+      const rawText = await res.text();
+      let data = {};
+      try {
+        data = rawText ? JSON.parse(rawText) : {};
+      } catch (parseErr) {
+        throw new Error(`Server returned status ${res.status} (${res.statusText || 'No JSON response'}). Please ensure the backend server is running on port 5000.`);
+      }
+
+      if (!res.ok || !data.success) {
+        throw new Error(data.error || `Authentication failed with status ${res.status}`);
       }
 
       onAuthSuccess(data.token, data.user);

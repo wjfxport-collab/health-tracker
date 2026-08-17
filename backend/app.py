@@ -2,6 +2,7 @@ from flask import Flask, request, jsonify, render_template_string
 from flask_cors import CORS
 from datetime import datetime, timedelta
 import os
+import sys
 import tempfile
 import traceback
 import database
@@ -570,12 +571,15 @@ def get_stats():
         return jsonify({'success': False, 'error': str(e)}), 500
 
 if __name__ == '__main__':
-    ssl_cert, ssl_key = ssl_manager.get_ssl_cert_paths()
-    ssl_context = (ssl_cert, ssl_key) if ssl_cert and ssl_key else None
-    
+    use_ssl = os.environ.get('ENABLE_SSL', '0') == '1' or '--ssl' in sys.argv or os.environ.get('USE_SSL', '0') == '1'
+    ssl_context = None
+    if use_ssl:
+        ssl_cert, ssl_key = ssl_manager.get_ssl_cert_paths()
+        ssl_context = (ssl_cert, ssl_key) if ssl_cert and ssl_key else None
+
     if ssl_context:
         print(f"🔒 Starting HealthPulse HTTPS Server on https://0.0.0.0:5000 (Cert: {ssl_cert})")
         app.run(host='0.0.0.0', port=5000, ssl_context=ssl_context, debug=True)
     else:
-        print("Starting HealthPulse HTTP Server on http://0.0.0.0:5000")
+        print("🚀 Starting HealthPulse HTTP Server on http://0.0.0.0:5000")
         app.run(host='0.0.0.0', port=5000, debug=True)
