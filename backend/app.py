@@ -11,6 +11,19 @@ import auth_service
 from auth_service import login_required
 import ssl_manager
 
+# Auto-load .env file if present in project root
+env_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '.env')
+if os.path.exists(env_file):
+    try:
+        with open(env_file, 'r') as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith('#') and '=' in line:
+                    k, v = line.split('=', 1)
+                    os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
+    except Exception as e:
+        print(f"Warning loading .env: {e}")
+
 app = Flask(__name__)
 # Enable CORS for React frontend (supports authorization headers & credentials)
 CORS(app, supports_credentials=True)
@@ -316,7 +329,7 @@ def upload_scale_photo_async():
             return jsonify({'success': False, 'error': 'Empty filename uploaded'}), 400
 
         goals = database.get_goals(user_id) or {}
-        api_key = goals.get('gemini_api_key') or os.environ.get('GEMINI_API_KEY', '')
+        api_key = (goals.get('gemini_api_key') or os.environ.get('GEMINI_API_KEY', '')).strip()
 
         suffix = os.path.splitext(file.filename)[1] or '.jpg'
         with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
