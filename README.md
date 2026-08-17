@@ -1,68 +1,68 @@
-# HealthPulse — Weight & Steps Tracker
+# 🏃 HealthPulse — Fullstack Weight & Steps Tracker
 
-A fullstack application for tracking daily weight and step counts, visualizing progress over time, and monitoring goal streaks.
+A fullstack health tracking dashboard featuring **AI-powered scale photo parsing** (via Google Gemini 2.5 Flash Vision or Local Mac Gemma 4 12B Vision), automatic EXIF capture timestamp extraction, and interactive progress metrics.
 
-## Architecture
+---
 
-* **Backend**: Python 3.12 + Flask REST API with SQLite database (`tracker.db`) in a dedicated `.venv`.
-* **Frontend**: React 18 + Vite with Lucide icons, responsive SVG trend charts, and modal loggers.
-* **Communication**: Decoupled REST API with CORS and Vite proxy (`/api`).
+## 🌟 Key Features
 
-## Project Layout
+- **🧠 Multi-Engine Scale Photo OCR**:
+  - 🌐 **Google Gemini 2.5 Flash Vision (Cloud)**: Reads 7-segment digital displays, aqua/blue screens, and glare-covered glass with human-grade accuracy.
+  - 💻 **Local Mac Gemma 4 12B Vision (LAN Server `192.168.4.27`)**: 100% private local LLM vision inference running directly on your Mac.
+  - ⚡ **Local Tesseract OCR (Offline)**: On-device image thresholding fallback.
+- **🕒 Automatic EXIF Timestamp Extraction**: Reads photo capture date & time (`DateTimeOriginal`) directly from photo metadata.
+- **📈 Interactive React Dashboard**:
+  - Weight progression trendlines & goal markers.
+  - 7-day and 30-day moving step averages.
+  - Daily streak counters and goal progress bars.
+- **📱 Remote & Mobile Friendly**: Accessible from desktop browsers and mobile devices over your local Wi-Fi.
 
-```
-health-tracker/
-├── .venv/                      # Python virtual environment
-├── backend/
-│   ├── app.py                  # Flask REST API server (port 5000)
-│   ├── database.py             # SQLite connection, models & queries
-│   ├── seed.py                 # Initial 14-day sample dataset generator
-│   └── requirements.txt        # Backend dependencies
-├── frontend/
-│   ├── src/
-│   │   ├── components/
-│   │   │   ├── MetricCards.jsx # Top metric cards (Weight, Steps, 7-day avg, Streak)
-│   │   │   ├── Charts.jsx      # Interactive weight curve & step bar visualizers
-│   │   │   ├── EntryForm.jsx   # Modal for adding/editing daily weight & steps
-│   │   │   ├── HistoryTable.jsx# Searchable, filterable entry logs
-│   │   │   └── GoalSettings.jsx# Target weight & step goal configuration
-│   │   ├── App.jsx             # Main dashboard
-│   │   ├── index.css           # Styling & design system
-│   │   └── main.jsx            # Entry point
-│   ├── package.json
-│   └── vite.config.js
-├── run.sh                      # Launch both backend and frontend together
-└── README.md
-```
+---
 
-## Quick Start
+## 🚀 Quick Start (Zero Config)
 
-### 1. Launch the Application
-Run the helper script from the project root:
+### Prerequisites
+- **Python 3.9+**
+- **Node.js 18+ & npm**
+
+### 1. Clone & Run
 ```bash
+# Clone the repository
+git clone https://github.com/wjfxport-collab/health-tracker.git
+cd health-tracker
+
+# Run the app (auto-installs Python .venv and npm packages on first launch)
 ./run.sh
 ```
 
-Or run each service separately:
+### 2. Open in Browser
+- **Frontend Dashboard**: `http://localhost:5173`
+- **Backend API**: `http://localhost:5000`
 
-#### Start Flask Backend:
-```bash
-./.venv/bin/python backend/app.py
-```
-Backend runs on `http://127.0.0.1:5000`
+---
 
-#### Start React Frontend:
+## 🛠️ Manual Installation (Optional)
+
+If you prefer to install dependencies manually:
+
 ```bash
+# 1. Setup Python Virtual Environment
+python3 -m venv .venv
+./.venv/bin/pip install -r backend/requirements.txt
+
+# 2. Setup Node.js Frontend Dependencies
 cd frontend
-npm run dev
+npm install
+cd ..
+
+# 3. Launch Servers
+./run.sh
 ```
-Frontend runs on `http://localhost:5173`
 
-## API Endpoints
+---
 
-* `GET /api/entries`: List all weight & step entries (newest first).
-* `POST /api/entries`: Create or upsert entry (`{ "date": "YYYY-MM-DD", "weight": 178.5, "steps": 10500, "notes": "..." }`).
-* `PUT /api/entries/<id>`: Update an entry.
-* `DELETE /api/entries/<id>`: Delete an entry.
-* `GET /api/stats`: Compute 7-day average, streak, weight progress %, best days.
-* `GET /api/goals` & `POST /api/goals`: Retrieve and update target step/weight goals.
+## ⚙️ AI Engine Configuration
+
+Open **"Goals"** in the top navigation bar:
+- **Google Gemini Vision**: Enter your Gemini API key (get a free key at [Google AI Studio](https://aistudio.google.com/app/apikey)).
+- **Local Mac Gemma 12B**: Set your server address (`http://192.168.4.27:11434` or custom port) and click **"Test Connection to Mac"**.
