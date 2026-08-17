@@ -1,22 +1,19 @@
 import React, { useState, useEffect } from 'react';
-import { X, Target, Save, Check, Sparkles, Eye, EyeOff, ExternalLink, Cpu, Server, Wifi, AlertCircle, RefreshCw } from 'lucide-react';
+import { X, Target, Save, Check, Sparkles, Eye, EyeOff, ExternalLink, Fingerprint, ShieldCheck, Trash2, Plus, LogOut, User } from 'lucide-react';
+import { registerPasskey } from '../utils/webauthn';
 
-export default function GoalSettings({ isOpen, onClose, goals, onSaveGoals }) {
+export default function GoalSettings({ isOpen, onClose, goals, onSaveGoals, user, token, onLogout, onPasskeysChanged }) {
   const [stepGoal, setStepGoal] = useState(10000);
   const [targetWeight, setTargetWeight] = useState(165);
   const [startingWeight, setStartingWeight] = useState(185);
   const [unit, setUnit] = useState('lbs');
-  
-  // AI Vision Settings
-  const [ocrEngine, setOcrEngine] = useState('gemini'); // 'gemini' | 'local_llm' | 'local'
   const [geminiApiKey, setGeminiApiKey] = useState('');
   const [showApiKey, setShowApiKey] = useState(false);
-  const [localLlmUrl, setLocalLlmUrl] = useState('http://192.168.4.27:11434');
-  const [localLlmModel, setLocalLlmModel] = useState('gemma-4-12b');
-
-  // Connection testing state
-  const [testingConnection, setTestingConnection] = useState(false);
-  const [testResult, setTestResult] = useState(null);
+  
+  // Passkey enrollment state
+  const [passkeyNickname, setPasskeyNickname] = useState('');
+  const [registeringPasskey, setRegisteringPasskey] = useState(false);
+  const [passkeyMsg, setPasskeyMsg] = useState('');
 
   const [loading, setLoading] = useState(false);
   const [savedSuccess, setSavedSuccess] = useState(false);
@@ -28,31 +25,41 @@ export default function GoalSettings({ isOpen, onClose, goals, onSaveGoals }) {
       setStartingWeight(goals.starting_weight || 185);
       setUnit(goals.weight_unit || 'lbs');
       setGeminiApiKey(goals.gemini_api_key || '');
-      setOcrEngine(goals.ocr_engine || 'gemini');
-      setLocalLlmUrl(goals.local_llm_url || 'http://192.168.4.27:11434');
-      setLocalLlmModel(goals.local_llm_model || 'gemma-4-12b');
     }
     setSavedSuccess(false);
-    setTestResult(null);
+    setPasskeyMsg('');
   }, [goals, isOpen]);
 
   if (!isOpen) return null;
 
-  const handleTestConnection = async () => {
-    setTestingConnection(true);
-    setTestResult(null);
+  const handleRegisterPasskey = async () => {
+    setRegisteringPasskey(true);
+    setPasskeyMsg('');
     try {
-      const res = await fetch('/api/test-local-llm', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ server_url: localLlmUrl.trim() })
+      await registerPasskey(token, passkeyNickname || 'My Device Biometrics');
+      setPasskeyMsg('✅ Biometric Passkey successfully enrolled!');
+      setPasskeyNickname('');
+      if (onPasskeysChanged) onPasskeysChanged();
+    } catch (err) {
+      setPasskeyMsg('❌ ' + (err.message || 'Passkey enrollment failed.'));
+    } finally {
+      setRegisteringPasskey(false);
+    }
+  };
+
+  const handleDeletePasskey = async (credId) => {
+    if (!window.confirm('Remove this passkey?')) return;
+    try {
+      const res = await fetch(`/api/auth/webauthn/credentials/${credId}`, {
+        method: 'DELETE',
+        headers: { 'Authorization': `Bearer ${token}` }
       });
       const data = await res.json();
-      setTestResult(data);
+      if (data.success && onPasskeysChanged) {
+        onPasskeysChanged();
+      }
     } catch (err) {
-      setTestResult({ success: false, message: 'Could not connect to test endpoint: ' + err.message });
-    } finally {
-      setTestingConnection(false);
+      alert('Failed to remove passkey: ' + err.message);
     }
   };
 
@@ -65,10 +72,7 @@ export default function GoalSettings({ isOpen, onClose, goals, onSaveGoals }) {
         target_weight: parseFloat(targetWeight),
         starting_weight: parseFloat(startingWeight),
         weight_unit: unit,
-        gemini_api_key: geminiApiKey.trim(),
-        ocr_engine: ocrEngine,
-        local_llm_url: localLlmUrl.trim(),
-        local_llm_model: localLlmModel.trim()
+        gemini_api_key: geminiApiKey.trim()
       });
       setSavedSuccess(true);
       setTimeout(() => {
@@ -83,29 +87,153 @@ export default function GoalSettings({ isOpen, onClose, goals, onSaveGoals }) {
 
   return (
     <div className="modal-overlay" onClick={onClose}>
-      <div className="modal-content" style={{ maxWidth: '580px' }} onClick={(e) => e.stopPropagation()}>
+      <div className="modal-content" style={{ maxWidth: '560px' }} onClick={(e) => e.stopPropagation()}>
         <div className="modal-header">
           <h3 className="modal-title" style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
             <Target size={20} style={{ color: 'var(--brand-primary)' }} />
-            Goals & Vision AI Settings
+            Account & Goal Settings
           </h3>
           <button className="close-btn" onClick={onClose}>
             <X size={20} />
           </button>
         </div>
 
+        {/* User Account Bar */}
+        {user && (
+          <div style={{
+            background: 'var(--bg-subtle)',
+            border: '1px solid var(--border-light)',
+            borderRadius: '8px',
+            padding: '12px 16px',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            marginBottom: '18px'
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+              <div style={{
+                width: '34px',
+                height: '34px',
+                borderRadius: '50%',
+                background: 'var(--brand-primary)',
+                color: 'white',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                fontWeight: 800,
+                fontSize: '14px'
+              }}>
+                {user.username?.[0]?.toUpperCase() || 'U'}
+              </div>
+              <div>
+                <div style={{ fontWeight: 700, fontSize: '14px', color: 'var(--text-primary)' }}>
+                  {user.username}
+                </div>
+                <div style={{ fontSize: '11px', color: 'var(--text-muted)' }}>
+                  User #{user.id} • Private Account
+                </div>
+              </div>
+            </div>
+
+            <button
+              type="button"
+              className="btn btn-secondary btn-sm"
+              onClick={() => { onClose(); onLogout(); }}
+            >
+              <LogOut size={13} /> Sign Out
+            </button>
+          </div>
+        )}
+
         <form onSubmit={handleSubmit}>
+          {/* Biometrics & Passkeys Section */}
+          <div style={{
+            background: '#f8fafc',
+            border: '1px solid var(--border-medium)',
+            borderRadius: 'var(--radius-md)',
+            padding: '14px',
+            marginBottom: '18px'
+          }}>
+            <h4 style={{ fontSize: '13px', fontWeight: 800, color: 'var(--text-primary)', display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '8px' }}>
+              <Fingerprint size={16} style={{ color: '#6366f1' }} />
+              Biometric Passkeys (Face ID / Touch ID)
+            </h4>
+
+            <p style={{ fontSize: '11px', color: 'var(--text-secondary)', lineHeight: 1.4, marginBottom: '10px' }}>
+              Register this device's fingerprint or face scan for instant passwordless sign-in.
+            </p>
+
+            {/* List of enrolled passkeys */}
+            {user?.passkeys && user.passkeys.length > 0 && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', marginBottom: '10px' }}>
+                {user.passkeys.map((pk) => (
+                  <div key={pk.id} style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    background: '#ffffff',
+                    padding: '8px 12px',
+                    borderRadius: '6px',
+                    border: '1px solid var(--border-light)',
+                    fontSize: '12px'
+                  }}>
+                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', fontWeight: 600 }}>
+                      <ShieldCheck size={14} style={{ color: 'var(--brand-primary)' }} />
+                      {pk.nickname || 'Biometric Passkey'}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => handleDeletePasskey(pk.id)}
+                      style={{ background: 'none', border: 'none', color: 'var(--brand-rose)', cursor: 'pointer', padding: '4px' }}
+                      title="Remove passkey"
+                    >
+                      <Trash2 size={13} />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {/* Register new passkey */}
+            <div style={{ display: 'flex', gap: '8px' }}>
+              <input
+                type="text"
+                className="form-input"
+                style={{ fontSize: '12px', padding: '6px 10px' }}
+                placeholder="Device Name (e.g. MacBook Touch ID)"
+                value={passkeyNickname}
+                onChange={(e) => setPasskeyNickname(e.target.value)}
+              />
+              <button
+                type="button"
+                className="btn btn-secondary btn-sm"
+                onClick={handleRegisterPasskey}
+                disabled={registeringPasskey}
+                style={{ flexShrink: 0 }}
+              >
+                <Plus size={13} />
+                {registeringPasskey ? 'Enrolling...' : 'Enroll Biometrics'}
+              </button>
+            </div>
+
+            {passkeyMsg && (
+              <div style={{ fontSize: '11px', marginTop: '6px', fontWeight: 600 }}>
+                {passkeyMsg}
+              </div>
+            )}
+          </div>
+
           {/* Fitness Targets Section */}
-          <div style={{ marginBottom: '20px' }}>
-            <h4 style={{ fontSize: '12px', fontWeight: 700, color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: '12px' }}>
+          <div style={{ marginBottom: '18px' }}>
+            <h4 style={{ fontSize: '12px', fontWeight: 700, color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: '10px' }}>
               Fitness Targets
             </h4>
 
             {/* Weight Unit */}
-            <div className="form-group">
-              <label className="form-label">Preferred Unit</label>
+            <div className="form-group" style={{ marginBottom: '10px' }}>
+              <label className="form-label" style={{ fontSize: '12px' }}>Preferred Unit</label>
               <div style={{ display: 'flex', gap: '16px' }}>
-                <label style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', cursor: 'pointer', fontSize: '14px' }}>
+                <label style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', cursor: 'pointer', fontSize: '13px' }}>
                   <input
                     type="radio"
                     name="unit"
@@ -115,7 +243,7 @@ export default function GoalSettings({ isOpen, onClose, goals, onSaveGoals }) {
                   />
                   Pounds (lbs)
                 </label>
-                <label style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', cursor: 'pointer', fontSize: '14px' }}>
+                <label style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', cursor: 'pointer', fontSize: '13px' }}>
                   <input
                     type="radio"
                     name="unit"
@@ -128,10 +256,9 @@ export default function GoalSettings({ isOpen, onClose, goals, onSaveGoals }) {
               </div>
             </div>
 
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
-              {/* Daily Steps Goal */}
-              <div className="form-group">
-                <label className="form-label">Daily Step Goal</label>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
+              <div className="form-group" style={{ marginBottom: '10px' }}>
+                <label className="form-label" style={{ fontSize: '12px' }}>Daily Step Goal</label>
                 <input
                   type="number"
                   step="500"
@@ -142,9 +269,8 @@ export default function GoalSettings({ isOpen, onClose, goals, onSaveGoals }) {
                 />
               </div>
 
-              {/* Target Weight */}
-              <div className="form-group">
-                <label className="form-label">Target Weight ({unit})</label>
+              <div className="form-group" style={{ marginBottom: '10px' }}>
+                <label className="form-label" style={{ fontSize: '12px' }}>Target Weight ({unit})</label>
                 <input
                   type="number"
                   step="0.1"
@@ -156,9 +282,8 @@ export default function GoalSettings({ isOpen, onClose, goals, onSaveGoals }) {
               </div>
             </div>
 
-            {/* Starting Weight */}
-            <div className="form-group">
-              <label className="form-label">Starting Weight ({unit})</label>
+            <div className="form-group" style={{ marginBottom: '0' }}>
+              <label className="form-label" style={{ fontSize: '12px' }}>Starting Weight ({unit})</label>
               <input
                 type="number"
                 step="0.1"
@@ -170,219 +295,58 @@ export default function GoalSettings({ isOpen, onClose, goals, onSaveGoals }) {
             </div>
           </div>
 
-          {/* AI Vision Engine Selection Section */}
+          {/* Gemini AI Vision Key Section */}
           <div style={{
-            background: '#f8fafc',
-            border: '1px solid var(--border-medium)',
+            background: 'var(--brand-purple-subtle)',
+            border: '1px solid var(--brand-purple-border)',
             borderRadius: 'var(--radius-md)',
-            padding: '16px',
+            padding: '14px',
             marginBottom: '20px'
           }}>
-            <h4 style={{ fontSize: '13px', fontWeight: 800, color: 'var(--text-primary)', marginBottom: '10px', display: 'flex', alignItems: 'center', gap: '6px' }}>
-              <Sparkles size={16} style={{ color: 'var(--brand-purple)' }} />
-              Scale Photo Vision Engine
-            </h4>
-
-            {/* 3-Way Engine Selector */}
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', marginBottom: '14px' }}>
-              {/* Option 1: Gemini Cloud */}
-              <label style={{
-                display: 'flex',
-                alignItems: 'center',
-                gap: '10px',
-                padding: '10px 12px',
-                background: ocrEngine === 'gemini' ? 'var(--brand-purple-subtle)' : '#ffffff',
-                border: `1px solid ${ocrEngine === 'gemini' ? 'var(--brand-purple-border)' : 'var(--border-light)'}`,
-                borderRadius: '8px',
-                cursor: 'pointer',
-                transition: 'all 0.15s'
-              }}>
-                <input
-                  type="radio"
-                  name="ocr_engine"
-                  value="gemini"
-                  checked={ocrEngine === 'gemini'}
-                  onChange={(e) => setOcrEngine(e.target.value)}
-                />
-                <div style={{ flex: 1 }}>
-                  <div style={{ fontWeight: 700, fontSize: '13px', color: 'var(--text-primary)' }}>
-                    Google Gemini 2.5 Flash Vision (Cloud)
-                  </div>
-                  <div style={{ fontSize: '11px', color: 'var(--text-secondary)' }}>
-                    Fastest cloud LLM with 99%+ accuracy on tricky 7-segment digital screens
-                  </div>
-                </div>
-              </label>
-
-              {/* Option 2: Local Mac Gemma 4 12B */}
-              <label style={{
-                display: 'flex',
-                alignItems: 'center',
-                gap: '10px',
-                padding: '10px 12px',
-                background: ocrEngine === 'local_llm' ? '#eff6ff' : '#ffffff',
-                border: `1px solid ${ocrEngine === 'local_llm' ? 'var(--brand-blue-border)' : 'var(--border-light)'}`,
-                borderRadius: '8px',
-                cursor: 'pointer',
-                transition: 'all 0.15s'
-              }}>
-                <input
-                  type="radio"
-                  name="ocr_engine"
-                  value="local_llm"
-                  checked={ocrEngine === 'local_llm'}
-                  onChange={(e) => setOcrEngine(e.target.value)}
-                />
-                <div style={{ flex: 1 }}>
-                  <div style={{ fontWeight: 700, fontSize: '13px', color: 'var(--text-primary)' }}>
-                    Local Mac Gemma 4 12B Vision (LAN: 192.168.4.27)
-                  </div>
-                  <div style={{ fontSize: '11px', color: 'var(--text-secondary)' }}>
-                    Private local network LLM server running on your Mac
-                  </div>
-                </div>
-              </label>
-
-              {/* Option 3: Local Tesseract OCR */}
-              <label style={{
-                display: 'flex',
-                alignItems: 'center',
-                gap: '10px',
-                padding: '10px 12px',
-                background: ocrEngine === 'local' ? 'var(--bg-subtle)' : '#ffffff',
-                border: `1px solid ${ocrEngine === 'local' ? 'var(--border-medium)' : 'var(--border-light)'}`,
-                borderRadius: '8px',
-                cursor: 'pointer',
-                transition: 'all 0.15s'
-              }}>
-                <input
-                  type="radio"
-                  name="ocr_engine"
-                  value="local"
-                  checked={ocrEngine === 'local'}
-                  onChange={(e) => setOcrEngine(e.target.value)}
-                />
-                <div style={{ flex: 1 }}>
-                  <div style={{ fontWeight: 700, fontSize: '13px', color: 'var(--text-primary)' }}>
-                    Local Tesseract OCR (Offline Fallback)
-                  </div>
-                  <div style={{ fontSize: '11px', color: 'var(--text-secondary)' }}>
-                    On-device OCR without requiring an LLM or network connection
-                  </div>
-                </div>
-              </label>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '6px' }}>
+              <h4 style={{ fontSize: '12px', fontWeight: 800, color: 'var(--brand-purple)', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                <Sparkles size={14} />
+                Google Gemini Flash Vision API Key
+              </h4>
+              <a
+                href="https://aistudio.google.com/app/apikey"
+                target="_blank"
+                rel="noreferrer"
+                style={{ fontSize: '11px', color: 'var(--brand-purple)', textDecoration: 'none', fontWeight: 600, display: 'inline-flex', alignItems: 'center', gap: '3px' }}
+              >
+                Get Free Key <ExternalLink size={10} />
+              </a>
             </div>
 
-            {/* Dynamic Settings Area: Gemini API Key */}
-            {ocrEngine === 'gemini' && (
-              <div style={{ background: '#ffffff', padding: '12px', borderRadius: '8px', border: '1px solid var(--brand-purple-border)' }}>
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '6px' }}>
-                  <label className="form-label" style={{ fontSize: '12px', margin: 0 }}>
-                    Google Gemini API Key
-                  </label>
-                  <a
-                    href="https://aistudio.google.com/app/apikey"
-                    target="_blank"
-                    rel="noreferrer"
-                    style={{ fontSize: '11px', color: 'var(--brand-purple)', textDecoration: 'none', fontWeight: 600, display: 'inline-flex', alignItems: 'center', gap: '3px' }}
-                  >
-                    Get Free Key <ExternalLink size={10} />
-                  </a>
-                </div>
-                <div style={{ position: 'relative' }}>
-                  <input
-                    type={showApiKey ? 'text' : 'password'}
-                    placeholder="AIzaSy..."
-                    className="form-input"
-                    style={{ paddingRight: '40px', fontSize: '13px' }}
-                    value={geminiApiKey}
-                    onChange={(e) => setGeminiApiKey(e.target.value)}
-                  />
-                  <button
-                    type="button"
-                    onClick={() => setShowApiKey(!showApiKey)}
-                    style={{
-                      position: 'absolute',
-                      right: '10px',
-                      top: '50%',
-                      transform: 'translateY(-50%)',
-                      background: 'none',
-                      border: 'none',
-                      cursor: 'pointer',
-                      color: 'var(--text-muted)'
-                    }}
-                  >
-                    {showApiKey ? <EyeOff size={16} /> : <Eye size={16} />}
-                  </button>
-                </div>
-              </div>
-            )}
-
-            {/* Dynamic Settings Area: Local Mac Gemma Config */}
-            {ocrEngine === 'local_llm' && (
-              <div style={{ background: '#ffffff', padding: '12px', borderRadius: '8px', border: '1px solid var(--brand-blue-border)' }}>
-                <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: '10px', marginBottom: '8px' }}>
-                  <div className="form-group" style={{ margin: 0 }}>
-                    <label className="form-label" style={{ fontSize: '11px', margin: '0 0 4px' }}>
-                      Mac Server URL (e.g. Ollama / vLLM / LM Studio)
-                    </label>
-                    <input
-                      type="text"
-                      className="form-input"
-                      style={{ fontSize: '13px' }}
-                      value={localLlmUrl}
-                      onChange={(e) => setLocalLlmUrl(e.target.value)}
-                      placeholder="http://192.168.4.27:11434"
-                      required
-                    />
-                  </div>
-
-                  <div className="form-group" style={{ margin: 0 }}>
-                    <label className="form-label" style={{ fontSize: '11px', margin: '0 0 4px' }}>
-                      Model Name
-                    </label>
-                    <input
-                      type="text"
-                      className="form-input"
-                      style={{ fontSize: '13px' }}
-                      value={localLlmModel}
-                      onChange={(e) => setLocalLlmModel(e.target.value)}
-                      placeholder="gemma-4-12b"
-                      required
-                    />
-                  </div>
-                </div>
-
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: '10px' }}>
-                  <button
-                    type="button"
-                    className="btn btn-secondary btn-sm"
-                    onClick={handleTestConnection}
-                    disabled={testingConnection}
-                  >
-                    <Wifi size={13} />
-                    {testingConnection ? 'Testing...' : 'Test Connection to Mac'}
-                  </button>
-
-                  {testResult && (
-                    <div style={{
-                      fontSize: '11px',
-                      fontWeight: 600,
-                      color: testResult.success ? 'var(--brand-primary)' : 'var(--brand-rose)',
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: '4px'
-                    }}>
-                      {testResult.success ? <Check size={13} /> : <AlertCircle size={13} />}
-                      {testResult.message}
-                    </div>
-                  )}
-                </div>
-              </div>
-            )}
+            <div style={{ position: 'relative' }}>
+              <input
+                type={showApiKey ? 'text' : 'password'}
+                placeholder="AIzaSy..."
+                className="form-input"
+                style={{ paddingRight: '40px', fontSize: '13px', background: '#ffffff' }}
+                value={geminiApiKey}
+                onChange={(e) => setGeminiApiKey(e.target.value)}
+              />
+              <button
+                type="button"
+                onClick={() => setShowApiKey(!showApiKey)}
+                style={{
+                  position: 'absolute',
+                  right: '10px',
+                  top: '50%',
+                  transform: 'translateY(-50%)',
+                  background: 'none',
+                  border: 'none',
+                  cursor: 'pointer',
+                  color: 'var(--text-muted)'
+                }}
+              >
+                {showApiKey ? <EyeOff size={15} /> : <Eye size={15} />}
+              </button>
+            </div>
           </div>
 
-          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '10px', marginTop: '20px' }}>
+          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '10px' }}>
             <button type="button" className="btn btn-secondary" onClick={onClose}>
               Cancel
             </button>

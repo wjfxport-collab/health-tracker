@@ -6,11 +6,13 @@ import tempfile
 import traceback
 import database
 import ocr_service
-import local_llm_service
+import auth_service
+from auth_service import login_required
+import ssl_manager
 
 app = Flask(__name__)
-# Enable CORS for React frontend (running on localhost:5173 or other remote IPs/ports)
-CORS(app)
+# Enable CORS for React frontend (supports authorization headers & credentials)
+CORS(app, supports_credentials=True)
 
 # Initialize DB on startup
 database.init_db()
@@ -20,7 +22,6 @@ HTML_DOCS = """
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>HealthPulse Backend API</title>
   <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;600;700;800&display=swap" rel="stylesheet">
   <style>
@@ -42,68 +43,67 @@ HTML_DOCS = """
     .put { background: rgba(217, 119, 6, 0.2); color: #fbbf24; }
     .delete { background: rgba(225, 29, 72, 0.2); color: #fb7185; }
     .route-link { color: #e2e8f0; font-family: monospace; text-decoration: none; font-size: 14px; }
-    .route-link:hover { color: #38bdf8; text-decoration: underline; }
     .desc { color: #94a3b8; font-size: 13px; }
   </style>
 </head>
 <body>
   <div class="container">
     <div class="header">
-      <div class="status-badge"><span class="status-dot"></span> API Server Online</div>
+      <div class="status-badge"><span class="status-dot"></span> Multi-User API Online</div>
       <h1>HealthPulse Backend API</h1>
-      <p>Flask REST API for weight tracking, step metrics, Gemini & Local Mac Gemma 4 12B Vision OCR.</p>
+      <p>Multi-User REST API with WebAuthn Passkeys, Biometrics (Touch ID / Face ID), Async Gemini Flash Vision OCR, and SSL.</p>
       <a href="http://localhost:5173" class="btn" target="_blank">Open React Frontend (Port 5173) &rarr;</a>
     </div>
 
     <div class="endpoints-card">
-      <h2 style="font-size: 18px; margin-bottom: 16px;">Available REST Endpoints</h2>
+      <h2 style="font-size: 18px; margin-bottom: 16px;">Available Endpoints</h2>
       
       <div class="endpoint">
         <div>
-          <span class="method get">GET</span>
-          <a class="route-link" href="/api/health" target="_blank">/api/health</a>
+          <span class="method post">POST</span>
+          <span class="route-link">/api/auth/register</span>
         </div>
-        <span class="desc">Health check status</span>
+        <span class="desc">Register new user account</span>
       </div>
 
       <div class="endpoint">
         <div>
           <span class="method post">POST</span>
-          <span class="route-link">/api/upload-scale-photo</span>
+          <span class="route-link">/api/auth/login</span>
         </div>
-        <span class="desc">Upload scale photo (Gemini, Local Gemma, or Tesseract)</span>
+        <span class="desc">Password login & token generation</span>
       </div>
 
       <div class="endpoint">
         <div>
           <span class="method post">POST</span>
-          <span class="route-link">/api/test-local-llm</span>
+          <span class="route-link">/api/auth/webauthn/login/verify</span>
         </div>
-        <span class="desc">Test connection to Mac Gemma server (192.168.4.27)</span>
+        <span class="desc">Biometric / Passkey passwordless sign-in</span>
+      </div>
+
+      <div class="endpoint">
+        <div>
+          <span class="method post">POST</span>
+          <span class="route-link">/api/upload-scale-photo/async</span>
+        </div>
+        <span class="desc">Instant async upload with Gemini Flash & EXIF</span>
       </div>
 
       <div class="endpoint">
         <div>
           <span class="method get">GET</span>
-          <a class="route-link" href="/api/entries" target="_blank">/api/entries</a>
+          <span class="route-link">/api/entries</span>
         </div>
-        <span class="desc">Fetch all logged entries</span>
+        <span class="desc">User-isolated weight & step history</span>
       </div>
 
       <div class="endpoint">
         <div>
           <span class="method get">GET</span>
-          <a class="route-link" href="/api/stats" target="_blank">/api/stats</a>
+          <span class="route-link">/api/stats</span>
         </div>
-        <span class="desc">7-day avg, streaks & weight progress</span>
-      </div>
-
-      <div class="endpoint">
-        <div>
-          <span class="method get">GET</span>
-          <a class="route-link" href="/api/goals" target="_blank">/api/goals</a>
-        </div>
-        <span class="desc">User step/weight targets & AI settings</span>
+        <span class="desc">User statistics, 7d/30d avg & streaks</span>
       </div>
     </div>
   </div>
@@ -113,47 +113,200 @@ HTML_DOCS = """
 
 @app.route('/', methods=['GET'])
 def index():
-    if request.headers.get('Accept') == 'application/json':
-        return jsonify({
-            'status': 'ok',
-            'message': 'HealthPulse Backend API is running',
-            'endpoints': [
-                '/api/health',
-                '/api/upload-scale-photo',
-                '/api/test-local-llm',
-                '/api/entries',
-                '/api/stats',
-                '/api/goals'
-            ]
-        })
     return render_template_string(HTML_DOCS)
 
 @app.route('/api/health', methods=['GET'])
 def health_check():
     return jsonify({'status': 'ok', 'message': 'Health Tracker API is running'})
 
-@app.route('/api/test-local-llm', methods=['POST'])
-def test_local_llm():
-    """
-    Test connectivity to the local Mac LLM server.
-    """
+# ==========================================
+# AUTHENTICATION & WEBAUTHN ENDPOINTS
+# ==========================================
+
+@app.route('/api/auth/register', methods=['POST'])
+def register():
     try:
         data = request.get_json() or {}
-        server_url = data.get('server_url', 'http://192.168.4.27:11434')
-        success, msg = local_llm_service.test_connection(server_url)
-        return jsonify({'success': success, 'message': msg})
-    except Exception as e:
-        return jsonify({'success': False, 'message': f'Error testing server: {str(e)}'}), 500
+        username = str(data.get('username', '')).strip()
+        password = str(data.get('password', '')).strip()
 
-@app.route('/api/upload-scale-photo', methods=['POST'])
-def upload_scale_photo():
+        if not username or len(username) < 3:
+            return jsonify({'success': False, 'error': 'Username must be at least 3 characters long.'}), 400
+        if not password or len(password) < 6:
+            return jsonify({'success': False, 'error': 'Password must be at least 6 characters long.'}), 400
+
+        existing = database.get_user_by_username(username)
+        if existing:
+            return jsonify({'success': False, 'error': f'Username "{username}" is already taken.'}), 409
+
+        pwd_hash = auth_service.hash_user_password(password)
+        user = database.create_user(username, pwd_hash)
+        if not user:
+            return jsonify({'success': False, 'error': 'Failed to create user account.'}), 500
+
+        token = auth_service.create_access_token(user['id'], user['username'])
+        return jsonify({
+            'success': True,
+            'token': token,
+            'user': {'id': user['id'], 'username': user['username']}
+        }), 201
+
+    except Exception as e:
+        app.logger.error(f"Error in register: {traceback.format_exc()}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/auth/login', methods=['POST'])
+def login():
+    try:
+        data = request.get_json() or {}
+        username = str(data.get('username', '')).strip()
+        password = str(data.get('password', '')).strip()
+
+        if not username or not password:
+            return jsonify({'success': False, 'error': 'Username and password are required.'}), 400
+
+        user = database.get_user_by_username(username)
+        if not user or not auth_service.verify_user_password(user['password_hash'], password):
+            return jsonify({'success': False, 'error': 'Invalid username or password.'}), 401
+
+        token = auth_service.create_access_token(user['id'], user['username'])
+        return jsonify({
+            'success': True,
+            'token': token,
+            'user': {'id': user['id'], 'username': user['username']}
+        })
+
+    except Exception as e:
+        app.logger.error(f"Error in login: {traceback.format_exc()}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/auth/me', methods=['GET'])
+@login_required
+def get_current_user_profile():
+    try:
+        user_id = request.current_user['id']
+        user = database.get_user_by_id(user_id)
+        if not user:
+            return jsonify({'success': False, 'error': 'User not found'}), 404
+        
+        credentials = database.get_webauthn_credentials_for_user(user_id)
+        return jsonify({
+            'success': True,
+            'user': {
+                'id': user['id'],
+                'username': user['username'],
+                'created_at': user['created_at'],
+                'passkeys_count': len(credentials),
+                'passkeys': credentials
+            }
+        })
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+# --- WebAuthn Registration (Passkey Enrollment) ---
+
+@app.route('/api/auth/webauthn/register/options', methods=['POST'])
+@login_required
+def webauthn_register_options():
+    try:
+        user_id = request.current_user['id']
+        username = request.current_user['username']
+        options = auth_service.create_registration_challenge(user_id, username)
+        return jsonify({'success': True, 'options': options})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/auth/webauthn/register/verify', methods=['POST'])
+@login_required
+def webauthn_register_verify():
+    try:
+        user_id = request.current_user['id']
+        data = request.get_json() or {}
+        challenge = data.get('challenge')
+        credential_id = data.get('credential_id')
+        public_key = data.get('public_key')
+        nickname = data.get('nickname', 'Biometric Device')
+
+        verified_challenge = auth_service.verify_registration_challenge(challenge)
+        if not verified_challenge or verified_challenge.get('user_id') != user_id:
+            return jsonify({'success': False, 'error': 'Invalid or expired WebAuthn challenge.'}), 400
+
+        database.save_webauthn_credential(
+            user_id=user_id,
+            credential_id=credential_id,
+            public_key=public_key,
+            nickname=nickname
+        )
+        return jsonify({'success': True, 'message': 'Passkey / Biometric device successfully enrolled!'})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+# --- WebAuthn Login (Biometric / Passkey Sign-In) ---
+
+@app.route('/api/auth/webauthn/login/options', methods=['POST'])
+def webauthn_login_options():
+    try:
+        data = request.get_json() or {}
+        username = data.get('username')
+        user = database.get_user_by_username(username) if username else None
+        user_id = user['id'] if user else None
+        
+        options = auth_service.create_authentication_challenge(user_id=user_id, username=username)
+        return jsonify({'success': True, 'options': options})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/auth/webauthn/login/verify', methods=['POST'])
+def webauthn_login_verify():
+    try:
+        data = request.get_json() or {}
+        challenge = data.get('challenge')
+        credential_id = data.get('credential_id')
+
+        verified_challenge = auth_service.verify_authentication_challenge(challenge)
+        if not verified_challenge:
+            return jsonify({'success': False, 'error': 'Invalid or expired WebAuthn authentication challenge.'}), 400
+
+        cred = database.get_webauthn_credential_by_id(credential_id)
+        if not cred:
+            return jsonify({'success': False, 'error': 'Passkey not recognized.'}), 404
+
+        token = auth_service.create_access_token(cred['user_id'], cred['username'])
+        return jsonify({
+            'success': True,
+            'token': token,
+            'user': {'id': cred['user_id'], 'username': cred['username']}
+        })
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/auth/webauthn/credentials/<int:cred_id>', methods=['DELETE'])
+@login_required
+def delete_passkey(cred_id):
+    try:
+        user_id = request.current_user['id']
+        deleted = database.delete_webauthn_credential(cred_id, user_id)
+        if not deleted:
+            return jsonify({'success': False, 'error': 'Passkey not found'}), 404
+        return jsonify({'success': True, 'message': 'Passkey removed.'})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+# ==========================================
+# ASYNCHRONOUS SCALE PHOTO UPLOAD PIPELINE
+# ==========================================
+
+@app.route('/api/upload-scale-photo/async', methods=['POST'])
+@login_required
+def upload_scale_photo_async():
     """
-    Handle scale photo upload:
-    - Extracts EXIF timestamp.
-    - Routes to Gemini Vision, Local Mac Gemma 4 12B, or Local Tesseract OCR.
-    - Saves to database if save_immediately is true.
+    Immediate non-blocking scale photo upload:
+    - Creates a background job in SQLite.
+    - Spawns background worker with Google Gemini Flash Vision & EXIF parser.
+    - Immediately returns job_id so dialog dismisses without delay.
     """
     try:
+        user_id = request.current_user['id']
         if 'photo' not in request.files:
             return jsonify({'success': False, 'error': 'No photo file provided in request (key "photo")'}), 400
         
@@ -161,79 +314,74 @@ def upload_scale_photo():
         if file.filename == '':
             return jsonify({'success': False, 'error': 'Empty filename uploaded'}), 400
 
-        # Retrieve AI settings from DB
-        goals = database.get_goals() or {}
+        goals = database.get_goals(user_id) or {}
         api_key = goals.get('gemini_api_key') or os.environ.get('GEMINI_API_KEY', '')
-        engine = goals.get('ocr_engine') or 'gemini'
-        local_llm_url = goals.get('local_llm_url') or 'http://192.168.4.27:11434'
-        local_llm_model = goals.get('local_llm_model') or 'gemma-4-12b'
-
-        # Allow request overrides
-        if request.form.get('api_key'):
-            api_key = request.form.get('api_key')
-        if request.form.get('engine'):
-            engine = request.form.get('engine')
-        if request.form.get('local_llm_url'):
-            local_llm_url = request.form.get('local_llm_url')
-        if request.form.get('local_llm_model'):
-            local_llm_model = request.form.get('local_llm_model')
 
         suffix = os.path.splitext(file.filename)[1] or '.jpg'
         with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
             tmp_path = tmp.name
             file.save(tmp_path)
 
-        try:
-            result = ocr_service.process_scale_photo(
-                tmp_path,
-                api_key=api_key,
-                preferred_engine=engine,
-                local_llm_url=local_llm_url,
-                local_llm_model=local_llm_model
-            )
-        finally:
-            if os.path.exists(tmp_path):
-                os.remove(tmp_path)
+        # Create tracking job
+        job_id = database.create_scale_upload_job(user_id)
 
-        save_immediately = request.form.get('save_immediately', 'false').lower() in ('true', '1')
-        if save_immediately and result.get('success') and result.get('weight'):
-            date_to_save = result.get('date') or datetime.now().strftime('%Y-%m-%d')
-            weight_val = result.get('weight')
-            steps_val = int(request.form.get('steps')) if request.form.get('steps') else None
-            notes_val = str(request.form.get('notes', result.get('notes') or 'Logged via Scale Photo Vision')).strip()
+        # Launch background processing with Gemini Flash Vision
+        ocr_service.start_async_scale_processing(user_id, job_id, tmp_path, api_key=api_key)
 
-            saved_entry = database.upsert_entry(
-                date_to_save,
-                weight=weight_val,
-                steps=steps_val,
-                notes=notes_val
-            )
-            result['saved_entry'] = saved_entry
-            result['saved_to_db'] = True
-
-        return jsonify(result)
+        return jsonify({
+            'success': True,
+            'job_id': job_id,
+            'status': 'processing',
+            'message': 'Photo uploaded successfully. Processing in background with Gemini Flash Vision.'
+        }), 202
 
     except Exception as e:
-        app.logger.error(f"Error in upload_scale_photo: {traceback.format_exc()}")
-        return jsonify({
-            'success': False,
-            'error': f'Failed to process photo: {str(e)}',
-            'date': datetime.now().strftime('%Y-%m-%d'),
-            'exif_found': False
-        }), 500
+        app.logger.error(f"Error in upload_scale_photo_async: {traceback.format_exc()}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/upload-scale-photo/status', methods=['GET'])
+@login_required
+def get_scale_upload_status():
+    """
+    Returns active or recent background scale upload jobs for the current user.
+    """
+    try:
+        user_id = request.current_user['id']
+        jobs = database.get_active_scale_upload_jobs(user_id)
+        return jsonify({'success': True, 'jobs': jobs})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/upload-scale-photo/jobs/<int:job_id>/dismiss', methods=['POST'])
+@login_required
+def dismiss_scale_upload_job(job_id):
+    try:
+        user_id = request.current_user['id']
+        database.dismiss_scale_upload_job(job_id, user_id)
+        return jsonify({'success': True, 'message': 'Job dismissed.'})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+# ==========================================
+# USER-SCOPED ENTRIES & STATS ENDPOINTS
+# ==========================================
 
 @app.route('/api/entries', methods=['GET'])
+@login_required
 def get_entries():
     try:
-        entries = database.get_all_entries()
+        user_id = request.current_user['id']
+        entries = database.get_all_entries(user_id)
         return jsonify({'success': True, 'entries': entries})
     except Exception as e:
         app.logger.error(f"Error in get_entries: {traceback.format_exc()}")
         return jsonify({'success': False, 'error': str(e)}), 500
 
 @app.route('/api/entries', methods=['POST'])
+@login_required
 def add_entry():
     try:
+        user_id = request.current_user['id']
         data = request.get_json() or {}
         date_str = data.get('date')
         if not date_str:
@@ -243,17 +391,18 @@ def add_entry():
         steps = int(data['steps']) if data.get('steps') not in (None, '') else None
         notes = str(data.get('notes', '')).strip()
 
-        entry = database.upsert_entry(date_str, weight=weight, steps=steps, notes=notes)
+        entry = database.upsert_entry(user_id, date_str, weight=weight, steps=steps, notes=notes)
         return jsonify({'success': True, 'entry': entry}), 201
     except ValueError as ve:
         return jsonify({'success': False, 'error': f'Invalid number format: {str(ve)}'}), 400
     except Exception as e:
-        app.logger.error(f"Error in add_entry: {traceback.format_exc()}")
         return jsonify({'success': False, 'error': str(e)}), 500
 
 @app.route('/api/entries/<int:entry_id>', methods=['PUT'])
+@login_required
 def update_entry(entry_id):
     try:
+        user_id = request.current_user['id']
         data = request.get_json() or {}
         date_str = data.get('date')
         if not date_str:
@@ -263,72 +412,71 @@ def update_entry(entry_id):
         steps = int(data['steps']) if data.get('steps') not in (None, '') else None
         notes = str(data.get('notes', '')).strip()
 
-        entry = database.update_entry(entry_id, date_str, weight=weight, steps=steps, notes=notes)
+        entry = database.update_entry(user_id, entry_id, date_str, weight=weight, steps=steps, notes=notes)
         if not entry:
             return jsonify({'success': False, 'error': 'Entry not found'}), 404
         return jsonify({'success': True, 'entry': entry})
     except Exception as e:
-        app.logger.error(f"Error in update_entry: {traceback.format_exc()}")
         return jsonify({'success': False, 'error': str(e)}), 500
 
 @app.route('/api/entries/<int:entry_id>', methods=['DELETE'])
+@login_required
 def delete_entry(entry_id):
     try:
-        deleted = database.delete_entry(entry_id)
+        user_id = request.current_user['id']
+        deleted = database.delete_entry(user_id, entry_id)
         if not deleted:
             return jsonify({'success': False, 'error': 'Entry not found'}), 404
         return jsonify({'success': True, 'message': 'Entry deleted successfully'})
     except Exception as e:
-        app.logger.error(f"Error in delete_entry: {traceback.format_exc()}")
         return jsonify({'success': False, 'error': str(e)}), 500
 
 @app.route('/api/goals', methods=['GET'])
+@login_required
 def get_goals():
     try:
-        goals = database.get_goals()
+        user_id = request.current_user['id']
+        goals = database.get_goals(user_id)
         has_api_key = bool(goals.get('gemini_api_key') or os.environ.get('GEMINI_API_KEY'))
         response_goals = dict(goals)
         response_goals['has_gemini_api_key'] = has_api_key
         return jsonify({'success': True, 'goals': response_goals})
     except Exception as e:
-        app.logger.error(f"Error in get_goals: {traceback.format_exc()}")
         return jsonify({'success': False, 'error': str(e)}), 500
 
 @app.route('/api/goals', methods=['POST'])
+@login_required
 def update_goals():
     try:
+        user_id = request.current_user['id']
         data = request.get_json() or {}
         daily_steps_goal = int(data.get('daily_steps_goal', 10000))
         target_weight = float(data.get('target_weight', 165.0))
         starting_weight = float(data.get('starting_weight', 185.0))
         weight_unit = str(data.get('weight_unit', 'lbs')).strip()
         gemini_api_key = str(data.get('gemini_api_key', '')).strip()
-        ocr_engine = str(data.get('ocr_engine', 'gemini')).strip()
-        local_llm_url = str(data.get('local_llm_url', 'http://192.168.4.27:11434')).strip()
-        local_llm_model = str(data.get('local_llm_model', 'gemma-4-12b')).strip()
 
         goals = database.update_goals(
+            user_id,
             daily_steps_goal,
             target_weight,
             starting_weight,
             weight_unit,
-            gemini_api_key=gemini_api_key,
-            ocr_engine=ocr_engine,
-            local_llm_url=local_llm_url,
-            local_llm_model=local_llm_model
+            gemini_api_key=gemini_api_key
         )
         response_goals = dict(goals)
         response_goals['has_gemini_api_key'] = bool(gemini_api_key or os.environ.get('GEMINI_API_KEY'))
         return jsonify({'success': True, 'goals': response_goals})
     except Exception as e:
-        app.logger.error(f"Error in update_goals: {traceback.format_exc()}")
         return jsonify({'success': False, 'error': str(e)}), 500
 
 @app.route('/api/stats', methods=['GET'])
+@login_required
 def get_stats():
     try:
-        entries = database.get_all_entries()
-        goals = database.get_goals() or {}
+        user_id = request.current_user['id']
+        entries = database.get_all_entries(user_id)
+        goals = database.get_goals(user_id) or {}
         
         step_goal = int(goals.get('daily_steps_goal') or 10000)
         target_weight = float(goals.get('target_weight') or 165.0)
@@ -421,16 +569,13 @@ def get_stats():
         app.logger.error(f"Error in get_stats: {traceback.format_exc()}")
         return jsonify({'success': False, 'error': str(e)}), 500
 
-@app.errorhandler(404)
-def handle_404(e):
-    if request.path.startswith('/api/'):
-        return jsonify({'success': False, 'error': f'Endpoint not found: {request.path}'}), 404
-    return render_template_string(HTML_DOCS), 200
-
-@app.errorhandler(500)
-def handle_500(e):
-    return jsonify({'success': False, 'error': 'Internal server error', 'details': str(e)}), 500
-
 if __name__ == '__main__':
-    print("Starting Health Tracker Flask API on http://127.0.0.1:5000")
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    ssl_cert, ssl_key = ssl_manager.get_ssl_cert_paths()
+    ssl_context = (ssl_cert, ssl_key) if ssl_cert and ssl_key else None
+    
+    if ssl_context:
+        print(f"🔒 Starting HealthPulse HTTPS Server on https://0.0.0.0:5000 (Cert: {ssl_cert})")
+        app.run(host='0.0.0.0', port=5000, ssl_context=ssl_context, debug=True)
+    else:
+        print("Starting HealthPulse HTTP Server on http://0.0.0.0:5000")
+        app.run(host='0.0.0.0', port=5000, debug=True)

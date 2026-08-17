@@ -6,8 +6,8 @@ import io
 from google import genai
 from google.genai import types
 
-# Priority list of active Gemini vision models
-VISION_MODELS = [
+# Priority active Gemini Flash Vision models
+FLASH_VISION_MODELS = [
     'gemini-flash-latest',
     'gemini-2.5-flash-lite',
     'gemini-3-flash-preview',
@@ -16,21 +16,20 @@ VISION_MODELS = [
 
 def parse_scale_with_gemini(img_path, api_key=None):
     """
-    Submit bathroom scale photo to Gemini Vision for human-grade parsing.
-    Tries active vision models (gemini-flash-latest, gemini-2.5-flash-lite, etc.)
+    Submit bathroom scale photo to Google Gemini Flash Vision for high-precision parsing.
     """
     key = (api_key or os.environ.get('GEMINI_API_KEY', '')).strip()
     if not key:
         return {
             'success': False,
-            'error': 'No Gemini API Key configured. Please enter your API key in Settings.',
+            'error': 'No Gemini API Key configured. Please add your key in Settings.',
             'engine': 'none'
         }
 
     try:
-        # 1. Open and optimize image for fast transmission
+        # 1. Open and optimize image
         img = Image.open(img_path)
-        img = ImageOps.exif_transpose(img) # Auto-rotate
+        img = ImageOps.exif_transpose(img) # Auto-rotate based on EXIF
         if img.mode != 'RGB':
             img = img.convert('RGB')
             
@@ -66,7 +65,7 @@ Respond ONLY with a JSON object in this exact schema:
 """
 
         last_error = None
-        for model_name in VISION_MODELS:
+        for model_name in FLASH_VISION_MODELS:
             try:
                 response = client.models.generate_content(
                     model=model_name,
@@ -103,19 +102,19 @@ Respond ONLY with a JSON object in this exact schema:
                 }
             except Exception as model_err:
                 last_error = str(model_err)
-                print(f"Model {model_name} attempt error: {model_err}")
+                print(f"Gemini Flash attempt on {model_name} error: {model_err}")
                 continue
 
         return {
             'success': False,
-            'error': f"Gemini API error: {last_error}",
+            'error': f"Scale reading was not legible: {last_error}",
             'engine': 'gemini-error'
         }
 
     except Exception as e:
-        print(f"Gemini Vision API error: {e}")
+        print(f"Gemini Flash Vision error: {e}")
         return {
             'success': False,
-            'error': f"Gemini API error: {str(e)}",
+            'error': f"Failed to process photo: {str(e)}",
             'engine': 'gemini-error'
         }
