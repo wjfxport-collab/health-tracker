@@ -1,6 +1,6 @@
 # 🏃 HealthPulse — Secure Multi-User Weight & Activity Tracker
 
-A fullstack health tracking platform with **Passkeys & Biometric authentication (Face ID / Touch ID)**, **automated Let's Encrypt SSL management**, **asynchronous Google Gemini Flash Vision scale parsing**, and **per-user data isolation**.
+A fullstack health tracking platform built with **SQLAlchemy 2.0 ORM**, **Pydantic v2 DTOs**, **Passkeys & Biometric authentication (Face ID / Touch ID)**, **Fernet AES Secrets Vault encryption at rest**, **automated Let's Encrypt SSL management**, **asynchronous Google Gemini Flash Vision scale parsing**, and **per-user data isolation**.
 
 ---
 
@@ -12,9 +12,9 @@ A fullstack health tracking platform with **Passkeys & Biometric authentication 
 - **🔑 WebAuthn Passkeys & Biometric Sign-In**:
   - One-touch sign-in using **Apple Face ID**, **Touch ID**, **Windows Hello**, or **Android Fingerprint**.
   - Register and manage multiple biometric devices directly from your account settings.
-- **🔒 SSL & Automated Let's Encrypt Management**:
-  - Automated 1-command Let's Encrypt certificate generation & auto-renewal cronjob (`./setup_ssl.sh --domain yourdomain.com`).
-  - Auto-generated local SSL certificates for secure LAN & localhost HTTPS testing.
+- **🔒 Authenticated Secrets Vault & Pydantic Configuration**:
+  - **Fernet AES-128-CBC encryption at rest**: API keys stored in SQLite are encrypted ciphertext.
+  - **Pydantic-Settings (12-Factor App)**: Automatically loads validated configurations from `.env` or system environment.
 - **🧠 Async Google Gemini Flash Vision Scale Parsing**:
   - **Instant Async Upload**: Scale photos upload instantly without blocking the UI.
   - **Google Gemini Flash Engine**: High-accuracy parsing on 7-segment digital displays, aqua/blue LCDs, and glass glare reflections.
@@ -50,26 +50,34 @@ cd health-tracker
 
 ---
 
+## 🧪 Unified Regression Testing Suite
+
+HealthPulse includes a full 3-tier regression testing suite covering backend Python APIs, frontend React components, and live JSON REST API endpoints:
+
+```bash
+# Run ALL regression test suites
+./test.sh --all
+
+# Run Python backend regression tests (Pytest - 25 tests)
+./test.sh --backend
+
+# Run React frontend component tests (Vitest - 12 tests)
+./test.sh --frontend
+
+# Run live JSON REST API regression test runner (13 tests)
+./test.sh --api
+```
+
+---
+
 ## 🔒 SSL & Let's Encrypt Automation
 
 ### Setup Let's Encrypt (Production Domain)
 ```bash
 ./setup_ssl.sh --domain yourdomain.com --email you@example.com
 ```
-* Automatically requests certificate from Let's Encrypt via Certbot.
-* Installs certificate files in `./certs/`.
-* Configures an automatic 90-day renewal cronjob.
 
 ### Local Development / LAN Self-Signed SSL (for Biometric Testing)
 ```bash
 ./setup_ssl.sh --self-signed
 ```
-
----
-
-## 🔑 Biometric Passkey Setup
-
-1. Sign in or register an account with a username and password.
-2. Click **"Settings" / Username** in the top navigation bar.
-3. Under **"Biometric Passkeys"**, click **"Enroll Biometrics"** and scan your fingerprint or face.
-4. On future sign-ins, simply tap **"Sign in with Touch ID / Face ID / Passkey"** for instant passwordless access!

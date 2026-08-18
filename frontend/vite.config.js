@@ -10,7 +10,7 @@ export default defineConfig({
       '/api': {
         target: process.env.VITE_BACKEND_URL || 'http://127.0.0.1:5000',
         changeOrigin: true,
-        secure: false, // Allow self-signed certs if proxying to https
+        secure: false,
         configure: (proxy, _options) => {
           proxy.on('error', (err, _req, res) => {
             console.error('[Vite Proxy Error]: Failed to connect to backend at http://127.0.0.1:5000:', err.message);
@@ -25,5 +25,11 @@ export default defineConfig({
         }
       }
     }
+  },
+  test: {
+    globals: true,
+    environment: 'happy-dom',
+    setupFiles: './src/setupTests.js',
+    css: false
   }
 });

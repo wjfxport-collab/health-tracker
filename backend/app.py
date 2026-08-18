@@ -617,6 +617,8 @@ def get_stats():
         return jsonify({'success': False, 'error': str(e)}), 500
 
 if __name__ == '__main__':
+    port = int(os.environ.get('PORT', settings.PORT))
+    host = os.environ.get('HOST', settings.HOST)
     use_ssl = settings.ENABLE_SSL or '--ssl' in sys.argv or os.environ.get('USE_SSL', '0') == '1'
     ssl_context = None
     if use_ssl:
@@ -624,8 +626,8 @@ if __name__ == '__main__':
         ssl_context = (ssl_cert, ssl_key) if ssl_cert and ssl_key else None
 
     if ssl_context:
-        print(f"🔒 Starting HealthPulse HTTPS Server on https://{settings.HOST}:{settings.PORT} (Cert: {ssl_cert})")
-        app.run(host=settings.HOST, port=settings.PORT, ssl_context=ssl_context, debug=True)
+        print(f"🔒 Starting HealthPulse HTTPS Server on https://{host}:{port} (Cert: {ssl_cert})")
+        app.run(host=host, port=port, ssl_context=ssl_context, debug=False, use_reloader=False)
     else:
-        print(f"🚀 Starting HealthPulse HTTP Server on http://{settings.HOST}:{settings.PORT}")
-        app.run(host=settings.HOST, port=settings.PORT, debug=True)
+        print(f"🚀 Starting HealthPulse HTTP Server on http://{host}:{port}")
+        app.run(host=host, port=port, debug=False, use_reloader=False)
