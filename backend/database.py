@@ -2,8 +2,10 @@ import sqlite3
 import os
 from datetime import datetime
 from werkzeug.security import generate_password_hash
+from config import settings
+import secrets_vault
 
-DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'tracker.db')
+DB_PATH = settings.DB_PATH
 
 def get_db_connection():
     conn = sqlite3.connect(DB_PATH)
@@ -103,7 +105,7 @@ def init_db():
     if 'gemini_api_key' not in goal_cols:
         cursor.execute("ALTER TABLE goals ADD COLUMN gemini_api_key TEXT DEFAULT ''")
 
-    # Now create unique indices safely
+    # Create unique indices safely
     cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_user_date ON entries(user_id, date)")
     cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_user_goals ON goals(user_id)")
 
@@ -116,7 +118,6 @@ def init_db():
             VALUES (1, 'admin', ?)
         ''', (default_pwd_hash,))
         
-        # Ensure default goals row exists for user 1
         cursor.execute('''
             INSERT OR IGNORE INTO goals (user_id, daily_steps_goal, target_weight, starting_weight, weight_unit)
             VALUES (1, 10000, 165.0, 185.0, 'lbs')
@@ -139,7 +140,6 @@ def create_user(username, password_hash=None):
         conn.commit()
         user_id = cursor.lastrowid
         
-        # Create default goals for this user
         cursor.execute('''
             INSERT INTO goals (user_id, daily_steps_goal, target_weight, starting_weight, weight_unit)
             VALUES (?, 10000, 165.0, 185.0, 'lbs')
@@ -331,7 +331,7 @@ def delete_entry(user_id, entry_id):
     conn.close()
     return deleted
 
-# --- User-Scoped Goals & Settings ---
+# --- User-Scoped Goals & Settings with Encrypted Credentials ---
 
 def get_goals(user_id):
     conn = get_db_connection()
@@ -347,13 +347,21 @@ def get_goals(user_id):
         cursor.execute('SELECT * FROM goals WHERE user_id = ?', (user_id,))
         row = cursor.fetchone()
     conn.close()
-    return dict(row)
+
+    result = dict(row) if row else {}
+    # Transparently decrypt API key from Secrets Vault
+    raw_encrypted_key = result.get('gemini_api_key', '')
+    result['gemini_api_key'] = secrets_vault.decrypt_secret(raw_encrypted_key)
+    return result
 
 def update_goals(user_id, daily_steps_goal, target_weight, starting_weight, weight_unit='lbs', gemini_api_key=''):
     conn = get_db_connection()
     cursor = conn.cursor()
     now = datetime.utcnow().isoformat()
     
+    # Encrypt sensitive API key before writing to database
+    encrypted_key = secrets_vault.encrypt_secret(gemini_api_key) if gemini_api_key else ''
+
     cursor.execute('''
         INSERT INTO goals (user_id, daily_steps_goal, target_weight, starting_weight, weight_unit, gemini_api_key, updated_at)
         VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -364,7 +372,7 @@ def update_goals(user_id, daily_steps_goal, target_weight, starting_weight, weig
             weight_unit = excluded.weight_unit,
             gemini_api_key = CASE WHEN excluded.gemini_api_key != '' THEN excluded.gemini_api_key ELSE goals.gemini_api_key END,
             updated_at = excluded.updated_at
-    ''', (user_id, daily_steps_goal, target_weight, starting_weight, weight_unit, gemini_api_key, now))
+    ''', (user_id, daily_steps_goal, target_weight, starting_weight, weight_unit, encrypted_key, now))
     
     conn.commit()
     conn.close()

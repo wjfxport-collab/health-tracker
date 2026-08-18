@@ -5,6 +5,7 @@ from PIL import Image, ImageOps
 import io
 from google import genai
 from google.genai import types
+from config import settings
 
 # Priority active Gemini Flash Vision models
 FLASH_VISION_MODELS = [
@@ -18,11 +19,11 @@ def parse_scale_with_gemini(img_path, api_key=None):
     """
     Submit bathroom scale photo to Google Gemini Flash Vision for high-precision parsing.
     """
-    key = (api_key or os.environ.get('GEMINI_API_KEY', '')).strip()
+    key = (api_key or settings.GEMINI_API_KEY).strip()
     if not key:
         return {
             'success': False,
-            'error': 'No Gemini API Key configured. Please add your key in Settings.',
+            'error': 'No Gemini API Key configured. Please add your key in Settings or .env file.',
             'engine': 'none'
         }
 

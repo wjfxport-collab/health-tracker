@@ -9,10 +9,11 @@ from functools import wraps
 from flask import request, jsonify
 from werkzeug.security import generate_password_hash, check_password_hash
 import jwt
+from config import settings
 
-JWT_SECRET = os.environ.get('JWT_SECRET', 'healthpulse-jwt-super-secure-key-change-in-prod-2026')
-RP_NAME = "HealthPulse Tracker"
-RP_ID = os.environ.get('RP_ID', 'localhost')
+JWT_SECRET = settings.JWT_SECRET
+RP_NAME = settings.RP_NAME
+RP_ID = settings.RP_ID
 
 # In-memory challenge store (maps challenge_id -> {challenge, user_id, expires_at})
 CHALLENGES = {}
@@ -56,7 +57,7 @@ def decode_access_token(token: str):
     try:
         payload = jwt.decode(token, JWT_SECRET, algorithms=['HS256'])
         return payload
-    except Exception as e:
+    except Exception:
         return None
 
 def login_required(f):

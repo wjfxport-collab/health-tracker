@@ -5,24 +5,13 @@ import os
 import sys
 import tempfile
 import traceback
+from config import settings
+import secrets_vault
 import database
 import ocr_service
 import auth_service
 from auth_service import login_required
 import ssl_manager
-
-# Auto-load .env file if present in project root
-env_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '.env')
-if os.path.exists(env_file):
-    try:
-        with open(env_file, 'r') as f:
-            for line in f:
-                line = line.strip()
-                if line and not line.startswith('#') and '=' in line:
-                    k, v = line.split('=', 1)
-                    os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
-    except Exception as e:
-        print(f"Warning loading .env: {e}")
 
 app = Flask(__name__)
 # Enable CORS for React frontend (supports authorization headers & credentials)
@@ -65,7 +54,7 @@ HTML_DOCS = """
     <div class="header">
       <div class="status-badge"><span class="status-dot"></span> Multi-User API Online</div>
       <h1>HealthPulse Backend API</h1>
-      <p>Multi-User REST API with WebAuthn Passkeys, Biometrics (Touch ID / Face ID), Async Gemini Flash Vision OCR, and SSL.</p>
+      <p>Multi-User REST API with Fernet Secrets Vault, Pydantic Settings, WebAuthn Passkeys, Biometrics, and Async Gemini Flash Vision.</p>
       <a href="http://localhost:5173" class="btn" target="_blank">Open React Frontend (Port 5173) &rarr;</a>
     </div>
 
@@ -131,7 +120,12 @@ def index():
 
 @app.route('/api/health', methods=['GET'])
 def health_check():
-    return jsonify({'status': 'ok', 'message': 'Health Tracker API is running'})
+    return jsonify({
+        'status': 'ok',
+        'message': 'Health Tracker API is running',
+        'config_loaded': True,
+        'secrets_vault': 'Fernet Authenticated AES-128-CBC'
+    })
 
 # ==========================================
 # AUTHENTICATION & WEBAUTHN ENDPOINTS
@@ -317,7 +311,7 @@ def upload_scale_photo_async():
     Immediate non-blocking scale photo upload:
     - Creates a background job in SQLite.
     - Spawns background worker with Google Gemini Flash Vision & EXIF parser.
-    - Immediately returns job_id so dialog dismisses without delay.
+    - Decrypts user's API key from Fernet Vault or uses global settings key.
     """
     try:
         user_id = request.current_user['id']
@@ -329,17 +323,16 @@ def upload_scale_photo_async():
             return jsonify({'success': False, 'error': 'Empty filename uploaded'}), 400
 
         goals = database.get_goals(user_id) or {}
-        api_key = (goals.get('gemini_api_key') or os.environ.get('GEMINI_API_KEY', '')).strip()
+        api_key = (goals.get('gemini_api_key') or settings.GEMINI_API_KEY).strip()
 
         suffix = os.path.splitext(file.filename)[1] or '.jpg'
         with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
             tmp_path = tmp.name
             file.save(tmp_path)
 
-        # Create tracking job
         job_id = database.create_scale_upload_job(user_id)
 
-        # Launch background processing with Gemini Flash Vision
+        # Launch background processing
         ocr_service.start_async_scale_processing(user_id, job_id, tmp_path, api_key=api_key)
 
         return jsonify({
@@ -356,9 +349,6 @@ def upload_scale_photo_async():
 @app.route('/api/upload-scale-photo/status', methods=['GET'])
 @login_required
 def get_scale_upload_status():
-    """
-    Returns active or recent background scale upload jobs for the current user.
-    """
     try:
         user_id = request.current_user['id']
         jobs = database.get_active_scale_upload_jobs(user_id)
@@ -451,9 +441,18 @@ def get_goals():
     try:
         user_id = request.current_user['id']
         goals = database.get_goals(user_id)
-        has_api_key = bool(goals.get('gemini_api_key') or os.environ.get('GEMINI_API_KEY'))
+        
+        # Check if user has key or global fallback key exists
+        user_key = goals.get('gemini_api_key', '')
+        effective_key = user_key or settings.GEMINI_API_KEY
+        has_api_key = bool(effective_key)
+
         response_goals = dict(goals)
         response_goals['has_gemini_api_key'] = has_api_key
+        # Never send raw plain secret to browser UI, return masked representation
+        response_goals['gemini_api_key_masked'] = secrets_vault.mask_secret(effective_key)
+        response_goals['gemini_api_key'] = user_key # Keep editable if set
+        
         return jsonify({'success': True, 'goals': response_goals})
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
@@ -478,8 +477,13 @@ def update_goals():
             weight_unit,
             gemini_api_key=gemini_api_key
         )
+        
+        user_key = goals.get('gemini_api_key', '')
+        effective_key = user_key or settings.GEMINI_API_KEY
         response_goals = dict(goals)
-        response_goals['has_gemini_api_key'] = bool(gemini_api_key or os.environ.get('GEMINI_API_KEY'))
+        response_goals['has_gemini_api_key'] = bool(effective_key)
+        response_goals['gemini_api_key_masked'] = secrets_vault.mask_secret(effective_key)
+        
         return jsonify({'success': True, 'goals': response_goals})
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
@@ -584,15 +588,15 @@ def get_stats():
         return jsonify({'success': False, 'error': str(e)}), 500
 
 if __name__ == '__main__':
-    use_ssl = os.environ.get('ENABLE_SSL', '0') == '1' or '--ssl' in sys.argv or os.environ.get('USE_SSL', '0') == '1'
+    use_ssl = settings.ENABLE_SSL or '--ssl' in sys.argv or os.environ.get('USE_SSL', '0') == '1'
     ssl_context = None
     if use_ssl:
         ssl_cert, ssl_key = ssl_manager.get_ssl_cert_paths()
         ssl_context = (ssl_cert, ssl_key) if ssl_cert and ssl_key else None
 
     if ssl_context:
-        print(f"🔒 Starting HealthPulse HTTPS Server on https://0.0.0.0:5000 (Cert: {ssl_cert})")
-        app.run(host='0.0.0.0', port=5000, ssl_context=ssl_context, debug=True)
+        print(f"🔒 Starting HealthPulse HTTPS Server on https://{settings.HOST}:{settings.PORT} (Cert: {ssl_cert})")
+        app.run(host=settings.HOST, port=settings.PORT, ssl_context=ssl_context, debug=True)
     else:
-        print("🚀 Starting HealthPulse HTTP Server on http://0.0.0.0:5000")
-        app.run(host='0.0.0.0', port=5000, debug=True)
+        print(f"🚀 Starting HealthPulse HTTP Server on http://{settings.HOST}:{settings.PORT}")
+        app.run(host=settings.HOST, port=settings.PORT, debug=True)
