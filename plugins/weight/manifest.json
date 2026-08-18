@@ -1,0 +1,33 @@
+{
+  "id": "weight",
+  "name": "Weight Tracker",
+  "version": "1.0.0",
+  "category": "body_composition",
+  "icon": "Scale",
+  "color": "#059669",
+  "description": "Daily body weight tracking with target goals and moving averages",
+  "fields": [
+    {
+      "id": "weight",
+      "label": "Weight",
+      "type": "number",
+      "required": true,
+      "min": 20,
+      "max": 1000,
+      "step": 0.1,
+      "unit": "lbs",
+      "placeholder": "e.g. 175.4"
+    }
+  ],
+  "goals": {
+    "supported": true,
+    "defaultTarget": 165.0,
+    "defaultStarting": 185.0,
+    "direction": "lower_is_better"
+  },
+  "visualizations": {
+    "cardType": "metric_progress",
+    "chartType": "line",
+    "aggregations": ["latest", "7d_avg", "change_from_start", "goal_progress"]
+  }
+}

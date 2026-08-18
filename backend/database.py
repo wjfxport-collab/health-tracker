@@ -1,4 +1,5 @@
 import os
+import json
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -9,7 +10,8 @@ from werkzeug.security import generate_password_hash
 
 from config import settings
 import secrets_vault
-from models import Base, User, Entry, Goal, WebAuthnCredential, ScaleUploadJob
+from models import Base, User, Entry, Goal, WebAuthnCredential, ScaleUploadJob, MetricDefinition, MetricEntry
+from plugin_engine import plugin_engine
 
 # Initialize SQLAlchemy 2.0 Engine and Session Factory
 DB_URL = f"sqlite:///{settings.DB_PATH}"
@@ -36,8 +38,7 @@ def get_session() -> Session:
 
 def _migrate_legacy_sqlite_constraints():
     """
-    Safely migrate legacy SQLite table constraints (e.g. single-column UNIQUE(date)
-    to composite UNIQUE(user_id, date)) while preserving 100% of existing data.
+    Safely migrate legacy SQLite table constraints while preserving 100% of existing data.
     """
     if not os.path.exists(settings.DB_PATH):
         return
@@ -45,11 +46,9 @@ def _migrate_legacy_sqlite_constraints():
     conn = sqlite3.connect(settings.DB_PATH)
     cursor = conn.cursor()
     
-    # Check entries table definition
     cursor.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='entries'")
     row = cursor.fetchone()
     if row and row[0] and ("date TEXT NOT NULL UNIQUE" in row[0] or "date TEXT UNIQUE" in row[0]):
-        # Recreate entries table with composite unique constraint
         cursor.execute("ALTER TABLE entries RENAME TO entries_old")
         cursor.execute('''
             CREATE TABLE entries (
@@ -75,13 +74,38 @@ def _migrate_legacy_sqlite_constraints():
 
     conn.close()
 
+def sync_plugins_to_database():
+    """
+    Sync all discovered component manifests from the plugins/ directory
+    into the database MetricDefinition table.
+    """
+    plugins = plugin_engine.reload_plugins()
+    with get_session() as session:
+        for plugin_id, manifest in plugins.items():
+            existing = session.get(MetricDefinition, plugin_id)
+            manifest_str = json.dumps(manifest)
+            if not existing:
+                metric_def = MetricDefinition(
+                    id=plugin_id,
+                    name=manifest.get("name", plugin_id.title()),
+                    category=manifest.get("category", "health"),
+                    manifest_json=manifest_str,
+                    is_active=True
+                )
+                session.add(metric_def)
+            else:
+                existing.name = manifest.get("name", plugin_id.title())
+                existing.category = manifest.get("category", "health")
+                existing.manifest_json = manifest_str
+
 def init_db():
     """
     Initialize database tables via SQLAlchemy declarative metadata,
-    run constraint migrations, and ensure default seeds exist.
+    run constraint migrations, seed admin account, and sync plugins.
     """
     _migrate_legacy_sqlite_constraints()
     Base.metadata.create_all(bind=engine)
+    sync_plugins_to_database()
 
     with get_session() as session:
         # Check if default admin user exists
@@ -106,22 +130,188 @@ def init_db():
             session.add(admin_goals)
 
 # ==========================================
-# USER CRUD (SQLAlchemy 2.0 ORM)
+# METRIC DEFINITIONS & DYNAMIC PLUGINS
 # ==========================================
 
-def create_user(username: str, password_hash: Optional[str] = None) -> Optional[Dict[str, Any]]:
-    clean_username = username.strip()
+def get_all_active_metric_definitions() -> List[Dict[str, Any]]:
     with get_session() as session:
-        existing = session.scalars(select(User).where(User.username == clean_username)).first()
+        defs = session.scalars(
+            select(MetricDefinition).where(MetricDefinition.is_active == True)
+        ).all()
+        return [d.to_dict() for d in defs]
+
+def get_metric_definition(metric_id: str) -> Optional[Dict[str, Any]]:
+    with get_session() as session:
+        d = session.get(MetricDefinition, metric_id)
+        return d.to_dict() if d else None
+
+# ==========================================
+# DYNAMIC METRIC ENTRIES CRUD
+# ==========================================
+
+def upsert_metric_entry(
+    user_id: int,
+    metric_id: str,
+    date_str: str,
+    payload: Dict[str, Any],
+    notes: str = ""
+) -> Dict[str, Any]:
+    """
+    Create or update a generic MetricEntry for any metric plugin.
+    Maintains 100% two-way sync with the legacy Entry model for weight and steps.
+    """
+    payload_str = json.dumps(payload)
+    now = datetime.now(timezone.utc)
+
+    with get_session() as session:
+        # For single-day unique metrics like weight and steps, find existing by (user_id, metric_id, date)
+        # For equipment sessions (camera_log), multiple sessions per day are permitted if distinct time
+        entry = None
+        if metric_id in ("weight", "steps"):
+            entry = session.scalars(
+                select(MetricEntry).where(
+                    MetricEntry.user_id == user_id,
+                    MetricEntry.metric_id == metric_id,
+                    MetricEntry.date == date_str
+                )
+            ).first()
+
+        if entry:
+            entry.payload_json = payload_str
+            entry.notes = notes or ""
+            entry.updated_at = now
+        else:
+            entry = MetricEntry(
+                user_id=user_id,
+                metric_id=metric_id,
+                date=date_str,
+                payload_json=payload_str,
+                notes=notes or "",
+                created_at=now,
+                updated_at=now
+            )
+            session.add(entry)
+
+        # Backward compatibility bridge: sync weight and steps to legacy Entry table
+        if metric_id == "weight" and "weight" in payload:
+            w_val = float(payload["weight"]) if payload["weight"] is not None else None
+            legacy_entry = session.scalars(
+                select(Entry).where(Entry.user_id == user_id, Entry.date == date_str)
+            ).first()
+            if legacy_entry:
+                legacy_entry.weight = w_val
+                if notes:
+                    legacy_entry.notes = notes
+            else:
+                session.add(Entry(user_id=user_id, date=date_str, weight=w_val, steps=None, notes=notes or ""))
+
+        elif metric_id == "steps" and "steps" in payload:
+            s_val = int(payload["steps"]) if payload["steps"] is not None else None
+            legacy_entry = session.scalars(
+                select(Entry).where(Entry.user_id == user_id, Entry.date == date_str)
+            ).first()
+            if legacy_entry:
+                legacy_entry.steps = s_val
+                if notes:
+                    legacy_entry.notes = notes
+            else:
+                session.add(Entry(user_id=user_id, date=date_str, weight=None, steps=s_val, notes=notes or ""))
+
+        session.flush()
+        return entry.to_dict()
+
+def get_metric_entries(
+    user_id: int,
+    metric_id: Optional[str] = None,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None
+) -> List[Dict[str, Any]]:
+    with get_session() as session:
+        query = select(MetricEntry).where(MetricEntry.user_id == user_id)
+        if metric_id:
+            query = query.where(MetricEntry.metric_id == metric_id)
+        if date_from:
+            query = query.where(MetricEntry.date >= date_from)
+        if date_to:
+            query = query.where(MetricEntry.date <= date_to)
+
+        query = query.order_by(desc(MetricEntry.date), desc(MetricEntry.id))
+        entries = session.scalars(query).all()
+        return [e.to_dict() for e in entries]
+
+def get_metric_entry_by_id(entry_id: int, user_id: int) -> Optional[Dict[str, Any]]:
+    with get_session() as session:
+        e = session.scalars(
+            select(MetricEntry).where(MetricEntry.id == entry_id, MetricEntry.user_id == user_id)
+        ).first()
+        return e.to_dict() if e else None
+
+def update_metric_entry(
+    user_id: int,
+    entry_id: int,
+    date_str: str,
+    payload: Dict[str, Any],
+    notes: str = ""
+) -> Optional[Dict[str, Any]]:
+    with get_session() as session:
+        entry = session.scalars(
+            select(MetricEntry).where(MetricEntry.id == entry_id, MetricEntry.user_id == user_id)
+        ).first()
+        if not entry:
+            return None
+
+        entry.date = date_str
+        entry.payload_json = json.dumps(payload)
+        entry.notes = notes or ""
+        entry.updated_at = datetime.now(timezone.utc)
+        session.flush()
+        return entry.to_dict()
+
+def delete_metric_entry(user_id: int, entry_id: int) -> bool:
+    with get_session() as session:
+        entry = session.scalars(
+            select(MetricEntry).where(MetricEntry.id == entry_id, MetricEntry.user_id == user_id)
+        ).first()
+        if entry:
+            session.delete(entry)
+            return True
+        return False
+
+# ==========================================
+# USERS CRUD
+# ==========================================
+
+def get_user_by_id(user_id: int) -> Optional[Dict[str, Any]]:
+    with get_session() as session:
+        user = session.get(User, user_id)
+        return user.to_dict() if user else None
+
+def get_user_by_username(username: str) -> Optional[Dict[str, Any]]:
+    if not username:
+        return None
+    with get_session() as session:
+        user = session.scalars(
+            select(User).where(User.username == username.strip())
+        ).first()
+        if user:
+            res = user.to_dict()
+            res["password_hash"] = user.password_hash
+            return res
+        return None
+
+def create_user(username: str, password_hash: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    with get_session() as session:
+        clean_user = username.strip()
+        existing = session.scalars(select(User).where(User.username == clean_user)).first()
         if existing:
             return None
 
-        user = User(username=clean_username, password_hash=password_hash)
-        session.add(user)
+        new_user = User(username=clean_user, password_hash=password_hash)
+        session.add(new_user)
         session.flush()
 
         goals = Goal(
-            user_id=user.id,
+            user_id=new_user.id,
             daily_steps_goal=10000,
             target_weight=165.0,
             starting_weight=185.0,
@@ -131,72 +321,36 @@ def create_user(username: str, password_hash: Optional[str] = None) -> Optional[
         session.add(goals)
         session.flush()
 
-        return user.to_dict()
-
-def get_user_by_id(user_id: int) -> Optional[Dict[str, Any]]:
-    with get_session() as session:
-        user = session.get(User, user_id)
-        if not user:
-            return None
-        res = user.to_dict()
-        res["password_hash"] = user.password_hash
-        return res
-
-def get_user_by_username(username: str) -> Optional[Dict[str, Any]]:
-    clean_username = username.strip()
-    with get_session() as session:
-        user = session.scalars(
-            select(User).where(User.username.ilike(clean_username))
-        ).first()
-        if not user:
-            return None
-        res = user.to_dict()
-        res["password_hash"] = user.password_hash
-        return res
+        return new_user.to_dict()
 
 # ==========================================
-# WEBAUTHN PASSKEYS (SQLAlchemy 2.0 ORM)
+# WEBAUTHN / PASSKEY CREDENTIALS
 # ==========================================
 
-def save_webauthn_credential(
-    user_id: int,
-    credential_id: str,
-    public_key: str,
-    sign_count: int = 0,
-    transports: str = '["internal"]',
-    nickname: str = "Biometric Device"
-) -> Dict[str, Any]:
+def save_webauthn_credential(user_id: int, credential_id: str, public_key: str, nickname: str = "Biometric Device") -> Dict[str, Any]:
     with get_session() as session:
-        cred = session.scalars(
-            select(WebAuthnCredential).where(WebAuthnCredential.credential_id == credential_id)
-        ).first()
+        existing = session.scalars(select(WebAuthnCredential).where(WebAuthnCredential.credential_id == credential_id)).first()
+        if existing:
+            existing.user_id = user_id
+            existing.public_key = public_key
+            existing.nickname = nickname
+            session.flush()
+            return existing.to_dict()
 
-        if cred:
-            cred.user_id = user_id
-            cred.public_key = public_key
-            cred.sign_count = sign_count
-            cred.transports = str(transports)
-            cred.nickname = nickname
-        else:
-            cred = WebAuthnCredential(
-                user_id=user_id,
-                credential_id=credential_id,
-                public_key=public_key,
-                sign_count=sign_count,
-                transports=str(transports),
-                nickname=nickname
-            )
-            session.add(cred)
-
+        cred = WebAuthnCredential(
+            user_id=user_id,
+            credential_id=credential_id,
+            public_key=public_key,
+            nickname=nickname
+        )
+        session.add(cred)
         session.flush()
         return cred.to_dict()
 
 def get_webauthn_credentials_for_user(user_id: int) -> List[Dict[str, Any]]:
     with get_session() as session:
         creds = session.scalars(
-            select(WebAuthnCredential)
-            .where(WebAuthnCredential.user_id == user_id)
-            .order_by(desc(WebAuthnCredential.created_at))
+            select(WebAuthnCredential).where(WebAuthnCredential.user_id == user_id).order_by(desc(WebAuthnCredential.created_at))
         ).all()
         return [c.to_dict() for c in creds]
 
@@ -205,27 +359,17 @@ def get_webauthn_credential_by_id(credential_id: str) -> Optional[Dict[str, Any]
         cred = session.scalars(
             select(WebAuthnCredential).where(WebAuthnCredential.credential_id == credential_id)
         ).first()
-        if not cred:
-            return None
-        res = cred.to_dict()
-        res["username"] = cred.user.username if cred.user else ""
-        return res
-
-def update_webauthn_sign_count(credential_id: str, sign_count: int) -> None:
-    with get_session() as session:
-        session.execute(
-            update(WebAuthnCredential)
-            .where(WebAuthnCredential.credential_id == credential_id)
-            .values(sign_count=sign_count)
-        )
+        if cred:
+            user = session.get(User, cred.user_id)
+            res = cred.to_dict()
+            res["username"] = user.username if user else ""
+            return res
+        return None
 
 def delete_webauthn_credential(cred_id: int, user_id: int) -> bool:
     with get_session() as session:
         cred = session.scalars(
-            select(WebAuthnCredential).where(
-                WebAuthnCredential.id == cred_id,
-                WebAuthnCredential.user_id == user_id
-            )
+            select(WebAuthnCredential).where(WebAuthnCredential.id == cred_id, WebAuthnCredential.user_id == user_id)
         ).first()
         if cred:
             session.delete(cred)
@@ -233,15 +377,12 @@ def delete_webauthn_credential(cred_id: int, user_id: int) -> bool:
         return False
 
 # ==========================================
-# SCALE UPLOAD JOBS (SQLAlchemy 2.0 ORM)
+# ASYNC SCALE UPLOAD JOBS
 # ==========================================
 
 def create_scale_upload_job(user_id: int) -> int:
     with get_session() as session:
-        job = ScaleUploadJob(
-            user_id=user_id,
-            status="processing"
-        )
+        job = ScaleUploadJob(user_id=user_id, status="processing")
         session.add(job)
         session.flush()
         return job.id
@@ -255,76 +396,64 @@ def update_scale_upload_job(
     time: Optional[str] = None,
     error: Optional[str] = None,
     notes: Optional[str] = None
-) -> None:
+) -> Optional[Dict[str, Any]]:
     with get_session() as session:
-        session.execute(
-            update(ScaleUploadJob)
-            .where(ScaleUploadJob.id == job_id)
-            .values(
-                status=status,
-                weight=weight,
-                unit=unit,
-                date=date,
-                time=time,
-                error=error,
-                notes=notes
-            )
-        )
+        job = session.get(ScaleUploadJob, job_id)
+        if not job:
+            return None
+
+        job.status = status
+        if weight is not None:
+            job.weight = weight
+        if unit:
+            job.unit = unit
+        if date:
+            job.date = date
+        if time:
+            job.time = time
+        if error is not None:
+            job.error = error
+        if notes is not None:
+            job.notes = notes
+
+        session.flush()
+        return job.to_dict()
 
 def get_active_scale_upload_jobs(user_id: int) -> List[Dict[str, Any]]:
     with get_session() as session:
         jobs = session.scalars(
-            select(ScaleUploadJob)
-            .where(
+            select(ScaleUploadJob).where(
                 ScaleUploadJob.user_id == user_id,
                 ScaleUploadJob.dismissed == 0
-            )
-            .order_by(desc(ScaleUploadJob.id))
-            .limit(5)
+            ).order_by(desc(ScaleUploadJob.id))
         ).all()
         return [j.to_dict() for j in jobs]
 
-def dismiss_scale_upload_job(job_id: int, user_id: int) -> None:
+def dismiss_scale_upload_job(job_id: int, user_id: int) -> bool:
     with get_session() as session:
-        session.execute(
-            update(ScaleUploadJob)
-            .where(
-                ScaleUploadJob.id == job_id,
-                ScaleUploadJob.user_id == user_id
-            )
-            .values(dismissed=1)
-        )
+        job = session.scalars(
+            select(ScaleUploadJob).where(ScaleUploadJob.id == job_id, ScaleUploadJob.user_id == user_id)
+        ).first()
+        if job:
+            job.dismissed = 1
+            return True
+        return False
 
 # ==========================================
-# ENTRIES CRUD (SQLAlchemy 2.0 ORM)
+# LEGACY ENTRIES CRUD (Backward Compatibility)
 # ==========================================
 
 def get_all_entries(user_id: int) -> List[Dict[str, Any]]:
     with get_session() as session:
         entries = session.scalars(
-            select(Entry)
-            .where(Entry.user_id == user_id)
-            .order_by(desc(Entry.date))
+            select(Entry).where(Entry.user_id == user_id).order_by(desc(Entry.date))
         ).all()
         return [e.to_dict() for e in entries]
 
 def get_entry_by_date(user_id: int, date_str: str) -> Optional[Dict[str, Any]]:
     with get_session() as session:
         entry = session.scalars(
-            select(Entry).where(
-                Entry.user_id == user_id,
-                Entry.date == date_str
-            )
-        ).first()
-        return entry.to_dict() if entry else None
-
-def get_entry_by_id(user_id: int, entry_id: int) -> Optional[Dict[str, Any]]:
-    with get_session() as session:
-        entry = session.scalars(
-            select(Entry).where(
-                Entry.id == entry_id,
-                Entry.user_id == user_id
-            )
+            select(Entry).where(Entry.user_id == user_id, Entry.date == date_str)
         ).first()
         return entry.to_dict() if entry else None
 
@@ -337,10 +466,7 @@ def upsert_entry(
 ) -> Dict[str, Any]:
     with get_session() as session:
         entry = session.scalars(
-            select(Entry).where(
-                Entry.user_id == user_id,
-                Entry.date == date_str
-            )
+            select(Entry).where(Entry.user_id == user_id, Entry.date == date_str)
         ).first()
 
         now = datetime.now(timezone.utc)
@@ -349,7 +475,7 @@ def upsert_entry(
                 entry.weight = weight
             if steps is not None:
                 entry.steps = steps
-            if notes:
+            if notes is not None and notes != "":
                 entry.notes = notes
             entry.updated_at = now
         else:
@@ -365,7 +491,15 @@ def upsert_entry(
             session.add(entry)
 
         session.flush()
-        return entry.to_dict()
+        res = entry.to_dict()
+
+    # Sync to MetricEntry store
+    if weight is not None:
+        upsert_metric_entry(user_id, "weight", date_str, {"weight": weight}, notes=notes)
+    if steps is not None:
+        upsert_metric_entry(user_id, "steps", date_str, {"steps": steps}, notes=notes)
+
+    return res
 
 def update_entry(
     user_id: int,
@@ -377,10 +511,7 @@ def update_entry(
 ) -> Optional[Dict[str, Any]]:
     with get_session() as session:
         entry = session.scalars(
-            select(Entry).where(
-                Entry.id == entry_id,
-                Entry.user_id == user_id
-            )
+            select(Entry).where(Entry.id == entry_id, Entry.user_id == user_id)
         ).first()
 
         if not entry:
@@ -401,10 +532,7 @@ def update_entry(
 def delete_entry(user_id: int, entry_id: int) -> bool:
     with get_session() as session:
         entry = session.scalars(
-            select(Entry).where(
-                Entry.id == entry_id,
-                Entry.user_id == user_id
-            )
+            select(Entry).where(Entry.id == entry_id, Entry.user_id == user_id)
         ).first()
         if entry:
             session.delete(entry)
@@ -417,9 +545,7 @@ def delete_entry(user_id: int, entry_id: int) -> bool:
 
 def get_goals(user_id: int) -> Dict[str, Any]:
     with get_session() as session:
-        goals = session.scalars(
-            select(Goal).where(Goal.user_id == user_id)
-        ).first()
+        goals = session.scalars(select(Goal).where(Goal.user_id == user_id)).first()
 
         if not goals:
             goals = Goal(
@@ -447,10 +573,7 @@ def update_goals(
     gemini_api_key: str = ""
 ) -> Dict[str, Any]:
     with get_session() as session:
-        goals = session.scalars(
-            select(Goal).where(Goal.user_id == user_id)
-        ).first()
-
+        goals = session.scalars(select(Goal).where(Goal.user_id == user_id)).first()
         encrypted_key = secrets_vault.encrypt_secret(gemini_api_key) if gemini_api_key else ""
         now = datetime.now(timezone.utc)
 

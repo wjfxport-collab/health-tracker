@@ -10,8 +10,9 @@ from pydantic import ValidationError
 from config import settings
 import secrets_vault
 import database
-from models import User, Entry, Goal, WebAuthnCredential, ScaleUploadJob
+from models import User, Entry, Goal, WebAuthnCredential, ScaleUploadJob, MetricDefinition, MetricEntry
 import schemas
+from plugin_engine import plugin_engine
 import ocr_service
 import auth_service
 from auth_service import login_required
@@ -21,7 +22,7 @@ app = Flask(__name__)
 # Enable CORS for React frontend (supports authorization headers & credentials)
 CORS(app, supports_credentials=True)
 
-# Initialize DB on startup
+# Initialize DB and sync plugins on startup
 database.init_db()
 
 HTML_DOCS = """
@@ -29,7 +30,7 @@ HTML_DOCS = """
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>HealthPulse Backend API (SQLAlchemy 2.0 ORM)</title>
+  <title>HealthPulse Backend API (Plugin & DevKit Architecture)</title>
   <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;600;700;800&display=swap" rel="stylesheet">
   <style>
     body { font-family: 'Plus Jakarta Sans', system-ui, sans-serif; background: #0f172a; color: #f8fafc; margin: 0; padding: 40px 20px; }
@@ -56,61 +57,37 @@ HTML_DOCS = """
 <body>
   <div class="container">
     <div class="header">
-      <div class="status-badge"><span class="status-dot"></span> SQLAlchemy 2.0 ORM Active</div>
+      <div class="status-badge"><span class="status-dot"></span> Metric DevKit & Plugin Engine Active</div>
       <h1>HealthPulse Backend API</h1>
-      <p>Decoupled Architecture with SQLAlchemy 2.0 ORM, Pydantic v2 DTOs, Fernet Secrets Vault, and WebAuthn Biometrics.</p>
+      <p>Manifest-Driven Extensible Architecture with Camera & Lens Session Tracker and Unified Metric Store.</p>
       <a href="http://localhost:5173" class="btn" target="_blank">Open React Frontend (Port 5173) &rarr;</a>
     </div>
 
     <div class="endpoints-card">
-      <h2 style="font-size: 18px; margin-bottom: 16px;">Available REST Endpoints</h2>
+      <h2 style="font-size: 18px; margin-bottom: 16px;">Available REST & Plugin Endpoints</h2>
       
       <div class="endpoint">
         <div>
-          <span class="method post">POST</span>
-          <span class="route-link">/api/auth/register</span>
+          <span class="method get">GET</span>
+          <span class="route-link">/api/plugins</span>
         </div>
-        <span class="desc">Register new user account</span>
+        <span class="desc">List installed metric component manifests</span>
       </div>
 
       <div class="endpoint">
         <div>
           <span class="method post">POST</span>
-          <span class="route-link">/api/auth/login</span>
+          <span class="route-link">/api/metrics/&lt;metric_id&gt;/entries</span>
         </div>
-        <span class="desc">Password login & token generation</span>
-      </div>
-
-      <div class="endpoint">
-        <div>
-          <span class="method post">POST</span>
-          <span class="route-link">/api/auth/webauthn/login/verify</span>
-        </div>
-        <span class="desc">Biometric / Passkey passwordless sign-in</span>
-      </div>
-
-      <div class="endpoint">
-        <div>
-          <span class="method post">POST</span>
-          <span class="route-link">/api/upload-scale-photo/async</span>
-        </div>
-        <span class="desc">Instant async upload with Gemini Flash & EXIF</span>
+        <span class="desc">Log validated dynamic metric entry (Camera, Weight, Steps, etc.)</span>
       </div>
 
       <div class="endpoint">
         <div>
           <span class="method get">GET</span>
-          <span class="route-link">/api/entries</span>
+          <span class="route-link">/api/metrics/&lt;metric_id&gt;/stats</span>
         </div>
-        <span class="desc">User-isolated weight & step history</span>
-      </div>
-
-      <div class="endpoint">
-        <div>
-          <span class="method get">GET</span>
-          <span class="route-link">/api/stats</span>
-        </div>
-        <span class="desc">User statistics, 7d/30d avg & streaks</span>
+        <span class="desc">Dynamic stats calculation based on manifest specifications</span>
       </div>
     </div>
   </div>
@@ -128,9 +105,149 @@ def health_check():
         'status': 'ok',
         'message': 'Health Tracker API is running',
         'orm': 'SQLAlchemy 2.0 Declarative Mapped Models',
-        'dto_layer': 'Pydantic v2 Contract Validation',
+        'plugin_engine': 'Dynamic Manifest Component Registry Active',
+        'installed_plugins': list(plugin_engine._manifest_cache.keys()),
         'secrets_vault': 'Fernet Authenticated AES-128-CBC'
     })
+
+# ==========================================
+# METRIC PLUGIN & DEVKIT REGISTRY ENDPOINTS
+# ==========================================
+
+@app.route('/api/plugins', methods=['GET'])
+def list_plugins():
+    try:
+        defs = database.get_all_active_metric_definitions()
+        plugin_dtos = [schemas.MetricDefinitionResponse.model_validate(d) for d in defs]
+        return jsonify(schemas.MetricPluginListResponse(plugins=plugin_dtos).model_dump())
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/metrics/<metric_id>/entries', methods=['GET'])
+@login_required
+def get_metric_entries_endpoint(metric_id):
+    try:
+        user_id = request.current_user['id']
+        entries = database.get_metric_entries(user_id=user_id, metric_id=metric_id)
+        entry_dtos = [schemas.MetricEntryResponse.model_validate(e) for e in entries]
+        return jsonify(schemas.MetricEntryListResponse(metric_id=metric_id, entries=entry_dtos).model_dump())
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/metrics/<metric_id>/entries', methods=['POST'])
+@login_required
+def add_metric_entry_endpoint(metric_id):
+    try:
+        user_id = request.current_user['id']
+        raw_json = request.get_json() or {}
+        
+        try:
+            req_data = schemas.MetricEntryCreateRequest.model_validate(raw_json)
+        except ValidationError as val_err:
+            first_err = val_err.errors()[0]
+            field = first_err.get('loc', ['field'])[-1]
+            return jsonify({'success': False, 'error': f"{field}: {first_err.get('msg')}"}), 400
+
+        # Validate incoming payload against plugin manifest schema
+        is_valid, err_msg, cleaned_payload = plugin_engine.validate_payload(metric_id, req_data.payload)
+        if not is_valid:
+            return jsonify({'success': False, 'error': err_msg}), 400
+
+        entry = database.upsert_metric_entry(
+            user_id=user_id,
+            metric_id=metric_id,
+            date_str=req_data.date,
+            payload=cleaned_payload,
+            notes=req_data.notes or ""
+        )
+        entry_dto = schemas.MetricEntryResponse.model_validate(entry)
+        return jsonify({'success': True, 'entry': entry_dto.model_dump()}), 201
+
+    except Exception as e:
+        app.logger.error(f"Error in add_metric_entry: {traceback.format_exc()}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/metrics/<metric_id>/entries/<int:entry_id>', methods=['PUT'])
+@login_required
+def update_metric_entry_endpoint(metric_id, entry_id):
+    try:
+        user_id = request.current_user['id']
+        raw_json = request.get_json() or {}
+        
+        try:
+            req_data = schemas.MetricEntryUpdateRequest.model_validate(raw_json)
+        except ValidationError as val_err:
+            first_err = val_err.errors()[0]
+            field = first_err.get('loc', ['field'])[-1]
+            return jsonify({'success': False, 'error': f"{field}: {first_err.get('msg')}"}), 400
+
+        is_valid, err_msg, cleaned_payload = plugin_engine.validate_payload(metric_id, req_data.payload)
+        if not is_valid:
+            return jsonify({'success': False, 'error': err_msg}), 400
+
+        entry = database.update_metric_entry(
+            user_id=user_id,
+            entry_id=entry_id,
+            date_str=req_data.date,
+            payload=cleaned_payload,
+            notes=req_data.notes or ""
+        )
+        if not entry:
+            return jsonify({'success': False, 'error': 'Metric entry not found'}), 404
+
+        entry_dto = schemas.MetricEntryResponse.model_validate(entry)
+        return jsonify({'success': True, 'entry': entry_dto.model_dump()})
+
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/metrics/<metric_id>/entries/<int:entry_id>', methods=['DELETE'])
+@login_required
+def delete_metric_entry_endpoint(metric_id, entry_id):
+    try:
+        user_id = request.current_user['id']
+        deleted = database.delete_metric_entry(user_id, entry_id)
+        if not deleted:
+            return jsonify({'success': False, 'error': 'Metric entry not found'}), 404
+        return jsonify({'success': True, 'message': 'Metric entry deleted successfully'})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/metrics/<metric_id>/stats', methods=['GET'])
+@login_required
+def get_metric_stats_endpoint(metric_id):
+    try:
+        user_id = request.current_user['id']
+        entries = database.get_metric_entries(user_id=user_id, metric_id=metric_id)
+        goals = database.get_goals(user_id) or {}
+        stats = plugin_engine.compute_stats(metric_id, entries, goals)
+        return jsonify({'success': True, 'stats': stats})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/metrics/summary', methods=['GET'])
+@login_required
+def get_all_metrics_summary():
+    try:
+        user_id = request.current_user['id']
+        plugins = plugin_engine.get_all_plugins()
+        goals = database.get_goals(user_id) or {}
+        summary = {}
+
+        for p in plugins:
+            pid = p['id']
+            entries = database.get_metric_entries(user_id=user_id, metric_id=pid)
+            stats = plugin_engine.compute_stats(pid, entries, goals)
+            summary[pid] = {
+                'manifest': p,
+                'stats': stats,
+                'entries_count': len(entries),
+                'latest_entry': entries[0] if entries else None
+            }
+
+        return jsonify({'success': True, 'summary': summary})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 # ==========================================
 # AUTHENTICATION & WEBAUTHN ENDPOINTS

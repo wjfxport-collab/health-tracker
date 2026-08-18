@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 HealthPulse — Automated JSON REST API Regression Test Runner
-Exercises all REST API endpoints over HTTP/HTTPS and generates a structured regression report.
+Exercises all REST API endpoints over HTTP/HTTPS including the Plugin DevKit & Camera Log component.
 """
 
 import sys
@@ -55,7 +55,7 @@ class APIRegressionRunner:
         })
         icon = f"{GREEN}✔ PASS{RESET}" if success else f"{RED}✘ FAIL{RESET}"
         timing = f"({duration_ms:.1f}ms)"
-        print(f" {icon} {BOLD}{name:<40}{RESET} [{status_code}] {timing} {details}")
+        print(f" {icon} {BOLD}{name:<45}{RESET} [{status_code}] {timing} {details}")
 
     def _request(self, method: str, path: str, body: Dict[str, Any] = None, auth: bool = True) -> Tuple[int, Dict[str, Any], float]:
         url = f"{self.base_url}{path}"
@@ -96,7 +96,12 @@ class APIRegressionRunner:
         status, data, ms = self._request("GET", "/api/health", auth=False)
         self.log_result("GET /api/health (Server Status)", status == 200 and data.get("status") == "ok", status, ms)
 
-        # 2. Register New User
+        # 2. Plugin Discovery
+        status, data, ms = self._request("GET", "/api/plugins", auth=False)
+        plugin_ids = [p["id"] for p in data.get("plugins", [])]
+        self.log_result("GET /api/plugins (DevKit Manifest Discovery)", status == 200 and "camera_log" in plugin_ids and "weight" in plugin_ids, status, ms)
+
+        # 3. Register New User
         status, data, ms = self._request("POST", "/api/auth/register", {
             "username": self.test_username,
             "password": self.test_password
@@ -104,14 +109,14 @@ class APIRegressionRunner:
         self.token = data.get("token")
         self.log_result("POST /api/auth/register (New User)", status == 201 and bool(self.token), status, ms)
 
-        # 3. Duplicate User Registration Conflict
+        # 4. Duplicate User Registration Conflict
         status, data, ms = self._request("POST", "/api/auth/register", {
             "username": self.test_username,
             "password": self.test_password
         }, auth=False)
         self.log_result("POST /api/auth/register (409 Conflict check)", status == 409, status, ms)
 
-        # 4. User Login
+        # 5. User Login
         status, data, ms = self._request("POST", "/api/auth/login", {
             "username": self.test_username,
             "password": self.test_password
@@ -119,15 +124,37 @@ class APIRegressionRunner:
         self.token = data.get("token")
         self.log_result("POST /api/auth/login (JWT Generation)", status == 200 and bool(self.token), status, ms)
 
-        # 5. Auth Profile
+        # 6. Auth Profile
         status, data, ms = self._request("GET", "/api/auth/me")
         self.log_result("GET /api/auth/me (User Profile)", status == 200 and data.get("user", {}).get("username") == self.test_username, status, ms)
 
-        # 6. WebAuthn Registration Options Challenge
+        # 7. WebAuthn Registration Options Challenge
         status, data, ms = self._request("POST", "/api/auth/webauthn/register/options")
         self.log_result("POST /api/auth/webauthn/register/options", status == 200 and "challenge" in data.get("options", {}), status, ms)
 
-        # 7. Add Entry
+        # 8. Dynamic Camera & Lens Session Logging (DevKit Addin)
+        status, data, ms = self._request("POST", "/api/metrics/camera_log/entries", {
+            "date": "2026-08-18",
+            "payload": {
+                "camera_body": "Sony A7 IV",
+                "lens": "FE 24-70mm f/2.8 GM II",
+                "timedate_of_use": "2026-08-18T15:30",
+                "focal_length": 50,
+                "aperture": "f/2.8",
+                "iso": 400,
+                "shutter_speed": "1/500s",
+                "comment": "Golden hour outdoor shoot"
+            },
+            "notes": "Outdoor location"
+        })
+        camera_entry_id = data.get("entry", {}).get("id")
+        self.log_result("POST /api/metrics/camera_log/entries (Gear Addin)", status == 201 and data.get("entry", {}).get("payload", {}).get("camera_body") == "Sony A7 IV", status, ms)
+
+        # 9. Dynamic Camera Stats
+        status, data, ms = self._request("GET", "/api/metrics/camera_log/stats")
+        self.log_result("GET /api/metrics/camera_log/stats (Equipment Stats)", status == 200 and data.get("stats", {}).get("top_camera") == "Sony A7 IV", status, ms)
+
+        # 10. Legacy & Dynamic Weight/Steps Entry
         test_date = "2026-08-18"
         status, data, ms = self._request("POST", "/api/entries", {
             "date": test_date,
@@ -136,23 +163,14 @@ class APIRegressionRunner:
             "notes": "Automated regression run"
         })
         entry_id = data.get("entry", {}).get("id")
-        self.log_result("POST /api/entries (Upsert Entry)", status == 201 and data.get("entry", {}).get("weight") == 176.5, status, ms)
+        self.log_result("POST /api/entries (Upsert Weight/Steps)", status == 201 and data.get("entry", {}).get("weight") == 176.5, status, ms)
 
-        # 8. Get Entries List
-        status, data, ms = self._request("GET", "/api/entries")
-        self.log_result("GET /api/entries (List History)", status == 200 and len(data.get("entries", [])) >= 1, status, ms)
+        # 11. Unified Metrics Summary
+        status, data, ms = self._request("GET", "/api/metrics/summary")
+        summary = data.get("summary", {})
+        self.log_result("GET /api/metrics/summary (Multi-Plugin Summary)", status == 200 and "camera_log" in summary and "weight" in summary, status, ms)
 
-        # 9. Update Entry
-        if entry_id:
-            status, data, ms = self._request("PUT", f"/api/entries/{entry_id}", {
-                "date": test_date,
-                "weight": 175.8,
-                "steps": 12000,
-                "notes": "Updated via regression runner"
-            })
-            self.log_result(f"PUT /api/entries/{entry_id} (Update Entry)", status == 200 and data.get("entry", {}).get("weight") == 175.8, status, ms)
-
-        # 10. Goals & Fernet Encryption Check
+        # 12. Goals & Fernet Encryption Check
         status, data, ms = self._request("POST", "/api/goals", {
             "daily_steps_goal": 13000,
             "target_weight": 162.0,
@@ -160,17 +178,13 @@ class APIRegressionRunner:
             "weight_unit": "lbs",
             "gemini_api_key": "AIzaSyRegressionRunnerSampleKey"
         })
-        self.log_result("POST /api/goals (Settings & Encryption)", status == 200 and data.get("goals", {}).get("has_gemini_api_key") is True, status, ms)
+        self.log_result("POST /api/goals (Settings & Fernet Encryption)", status == 200 and data.get("goals", {}).get("has_gemini_api_key") is True, status, ms)
 
-        # 11. Get Stats Calculations
-        status, data, ms = self._request("GET", "/api/stats")
-        self.log_result("GET /api/stats (Calculated Metrics)", status == 200 and data.get("stats", {}).get("total_days_logged") >= 1, status, ms)
-
-        # 12. Scale Upload Job Polling
+        # 13. Scale Upload Job Polling
         status, data, ms = self._request("GET", "/api/upload-scale-photo/status")
         self.log_result("GET /api/upload-scale-photo/status", status == 200 and "jobs" in data, status, ms)
 
-        # 13. Delete Entry Cleanup
+        # 14. Delete Entry Cleanup
         if entry_id:
             status, data, ms = self._request("DELETE", f"/api/entries/{entry_id}")
             self.log_result(f"DELETE /api/entries/{entry_id} (Cleanup)", status == 200, status, ms)

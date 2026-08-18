@@ -1,0 +1,31 @@
+{
+  "id": "steps",
+  "name": "Daily Steps",
+  "version": "1.0.0",
+  "category": "activity",
+  "icon": "Footprints",
+  "color": "#2563eb",
+  "description": "Daily walking step tracker with consistency streak milestones",
+  "fields": [
+    {
+      "id": "steps",
+      "label": "Steps Walked",
+      "type": "integer",
+      "required": true,
+      "min": 0,
+      "max": 150000,
+      "unit": "steps",
+      "placeholder": "e.g. 10000"
+    }
+  ],
+  "goals": {
+    "supported": true,
+    "defaultTarget": 10000,
+    "direction": "higher_is_better"
+  },
+  "visualizations": {
+    "cardType": "metric_progress",
+    "chartType": "bar",
+    "aggregations": ["today", "7d_avg", "30d_avg", "streak", "best_day"]
+  }
+}

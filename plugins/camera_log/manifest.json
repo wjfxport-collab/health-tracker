@@ -1,0 +1,89 @@
+{
+  "id": "camera_log",
+  "name": "Camera & Lens Gear Log",
+  "version": "1.0.0",
+  "category": "equipment",
+  "icon": "Camera",
+  "color": "#4f46e5",
+  "description": "Log camera bodies, lenses, shoot timestamps, exposure settings, and session notes",
+  "fields": [
+    {
+      "id": "camera_body",
+      "label": "Camera Body",
+      "type": "select",
+      "required": true,
+      "options": [
+        "Sony A7 IV",
+        "Sony A7R V",
+        "Sony FX3",
+        "Canon EOS R5",
+        "Canon EOS R6 Mark II",
+        "Nikon Z8",
+        "Nikon Z6 III",
+        "Fujifilm X-T5",
+        "Fujifilm GFX 100 II",
+        "Leica Q3",
+        "Panasonic Lumix S5 II",
+        "Other"
+      ],
+      "placeholder": "Select camera body"
+    },
+    {
+      "id": "lens",
+      "label": "Lens Used",
+      "type": "text",
+      "required": true,
+      "placeholder": "e.g. FE 24-70mm f/2.8 GM II"
+    },
+    {
+      "id": "timedate_of_use",
+      "label": "Date & Time of Session",
+      "type": "datetime-local",
+      "required": true
+    },
+    {
+      "id": "focal_length",
+      "label": "Focal Length (mm)",
+      "type": "number",
+      "required": false,
+      "min": 8,
+      "max": 1200,
+      "placeholder": "e.g. 50"
+    },
+    {
+      "id": "aperture",
+      "label": "Aperture",
+      "type": "select",
+      "required": false,
+      "options": ["f/1.2", "f/1.4", "f/1.8", "f/2.0", "f/2.8", "f/4.0", "f/5.6", "f/8.0", "f/11", "f/16", "f/22"],
+      "placeholder": "Select aperture"
+    },
+    {
+      "id": "iso",
+      "label": "ISO",
+      "type": "number",
+      "required": false,
+      "min": 50,
+      "max": 204800,
+      "placeholder": "e.g. 400"
+    },
+    {
+      "id": "shutter_speed",
+      "label": "Shutter Speed",
+      "type": "text",
+      "required": false,
+      "placeholder": "e.g. 1/500s"
+    },
+    {
+      "id": "comment",
+      "label": "Shoot Notes & Location",
+      "type": "textarea",
+      "required": false,
+      "placeholder": "Lighting setup, scene description, model, or location notes..."
+    }
+  ],
+  "visualizations": {
+    "cardType": "log_summary",
+    "aggregations": ["latest_session", "total_sessions", "top_cameras", "top_lenses"]
+  }
+}
