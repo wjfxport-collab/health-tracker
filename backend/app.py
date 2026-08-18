@@ -5,9 +5,13 @@ import os
 import sys
 import tempfile
 import traceback
+from pydantic import ValidationError
+
 from config import settings
 import secrets_vault
 import database
+from models import User, Entry, Goal, WebAuthnCredential, ScaleUploadJob
+import schemas
 import ocr_service
 import auth_service
 from auth_service import login_required
@@ -25,7 +29,7 @@ HTML_DOCS = """
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>HealthPulse Backend API</title>
+  <title>HealthPulse Backend API (SQLAlchemy 2.0 ORM)</title>
   <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;600;700;800&display=swap" rel="stylesheet">
   <style>
     body { font-family: 'Plus Jakarta Sans', system-ui, sans-serif; background: #0f172a; color: #f8fafc; margin: 0; padding: 40px 20px; }
@@ -52,14 +56,14 @@ HTML_DOCS = """
 <body>
   <div class="container">
     <div class="header">
-      <div class="status-badge"><span class="status-dot"></span> Multi-User API Online</div>
+      <div class="status-badge"><span class="status-dot"></span> SQLAlchemy 2.0 ORM Active</div>
       <h1>HealthPulse Backend API</h1>
-      <p>Multi-User REST API with Fernet Secrets Vault, Pydantic Settings, WebAuthn Passkeys, Biometrics, and Async Gemini Flash Vision.</p>
+      <p>Decoupled Architecture with SQLAlchemy 2.0 ORM, Pydantic v2 DTOs, Fernet Secrets Vault, and WebAuthn Biometrics.</p>
       <a href="http://localhost:5173" class="btn" target="_blank">Open React Frontend (Port 5173) &rarr;</a>
     </div>
 
     <div class="endpoints-card">
-      <h2 style="font-size: 18px; margin-bottom: 16px;">Available Endpoints</h2>
+      <h2 style="font-size: 18px; margin-bottom: 16px;">Available REST Endpoints</h2>
       
       <div class="endpoint">
         <div>
@@ -123,7 +127,8 @@ def health_check():
     return jsonify({
         'status': 'ok',
         'message': 'Health Tracker API is running',
-        'config_loaded': True,
+        'orm': 'SQLAlchemy 2.0 Declarative Mapped Models',
+        'dto_layer': 'Pydantic v2 Contract Validation',
         'secrets_vault': 'Fernet Authenticated AES-128-CBC'
     })
 
@@ -134,29 +139,29 @@ def health_check():
 @app.route('/api/auth/register', methods=['POST'])
 def register():
     try:
-        data = request.get_json() or {}
-        username = str(data.get('username', '')).strip()
-        password = str(data.get('password', '')).strip()
+        raw_json = request.get_json() or {}
+        try:
+            req_data = schemas.UserRegisterRequest.model_validate(raw_json)
+        except ValidationError as val_err:
+            first_err = val_err.errors()[0]
+            field = first_err.get('loc', ['field'])[-1]
+            return jsonify({'success': False, 'error': f"{field}: {first_err.get('msg')}"}), 400
 
-        if not username or len(username) < 3:
-            return jsonify({'success': False, 'error': 'Username must be at least 3 characters long.'}), 400
-        if not password or len(password) < 6:
-            return jsonify({'success': False, 'error': 'Password must be at least 6 characters long.'}), 400
-
-        existing = database.get_user_by_username(username)
+        existing = database.get_user_by_username(req_data.username)
         if existing:
-            return jsonify({'success': False, 'error': f'Username "{username}" is already taken.'}), 409
+            return jsonify({'success': False, 'error': f'Username "{req_data.username}" is already taken.'}), 409
 
-        pwd_hash = auth_service.hash_user_password(password)
-        user = database.create_user(username, pwd_hash)
+        pwd_hash = auth_service.hash_user_password(req_data.password)
+        user = database.create_user(req_data.username, pwd_hash)
         if not user:
             return jsonify({'success': False, 'error': 'Failed to create user account.'}), 500
 
         token = auth_service.create_access_token(user['id'], user['username'])
+        user_dto = schemas.UserResponse(id=user['id'], username=user['username'])
         return jsonify({
             'success': True,
             'token': token,
-            'user': {'id': user['id'], 'username': user['username']}
+            'user': user_dto.model_dump()
         }), 201
 
     except Exception as e:
@@ -166,22 +171,22 @@ def register():
 @app.route('/api/auth/login', methods=['POST'])
 def login():
     try:
-        data = request.get_json() or {}
-        username = str(data.get('username', '')).strip()
-        password = str(data.get('password', '')).strip()
-
-        if not username or not password:
+        raw_json = request.get_json() or {}
+        try:
+            req_data = schemas.UserLoginRequest.model_validate(raw_json)
+        except ValidationError as val_err:
             return jsonify({'success': False, 'error': 'Username and password are required.'}), 400
 
-        user = database.get_user_by_username(username)
-        if not user or not auth_service.verify_user_password(user['password_hash'], password):
+        user = database.get_user_by_username(req_data.username)
+        if not user or not auth_service.verify_user_password(user['password_hash'], req_data.password):
             return jsonify({'success': False, 'error': 'Invalid username or password.'}), 401
 
         token = auth_service.create_access_token(user['id'], user['username'])
+        user_dto = schemas.UserResponse(id=user['id'], username=user['username'])
         return jsonify({
             'success': True,
             'token': token,
-            'user': {'id': user['id'], 'username': user['username']}
+            'user': user_dto.model_dump()
         })
 
     except Exception as e:
@@ -198,15 +203,17 @@ def get_current_user_profile():
             return jsonify({'success': False, 'error': 'User not found'}), 404
         
         credentials = database.get_webauthn_credentials_for_user(user_id)
+        passkey_dtos = [schemas.WebAuthnPasskeyItem.model_validate(c) for c in credentials]
+        profile_dto = schemas.UserProfileResponse(
+            id=user['id'],
+            username=user['username'],
+            created_at=user['created_at'],
+            passkeys_count=len(credentials),
+            passkeys=passkey_dtos
+        )
         return jsonify({
             'success': True,
-            'user': {
-                'id': user['id'],
-                'username': user['username'],
-                'created_at': user['created_at'],
-                'passkeys_count': len(credentials),
-                'passkeys': credentials
-            }
+            'user': profile_dto.model_dump()
         })
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
@@ -280,10 +287,11 @@ def webauthn_login_verify():
             return jsonify({'success': False, 'error': 'Passkey not recognized.'}), 404
 
         token = auth_service.create_access_token(cred['user_id'], cred['username'])
+        user_dto = schemas.UserResponse(id=cred['user_id'], username=cred['username'])
         return jsonify({
             'success': True,
             'token': token,
-            'user': {'id': cred['user_id'], 'username': cred['username']}
+            'user': user_dto.model_dump()
         })
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
@@ -307,12 +315,6 @@ def delete_passkey(cred_id):
 @app.route('/api/upload-scale-photo/async', methods=['POST'])
 @login_required
 def upload_scale_photo_async():
-    """
-    Immediate non-blocking scale photo upload:
-    - Creates a background job in SQLite.
-    - Spawns background worker with Google Gemini Flash Vision & EXIF parser.
-    - Decrypts user's API key from Fernet Vault or uses global settings key.
-    """
     try:
         user_id = request.current_user['id']
         if 'photo' not in request.files:
@@ -332,7 +334,7 @@ def upload_scale_photo_async():
 
         job_id = database.create_scale_upload_job(user_id)
 
-        # Launch background processing
+        # Launch background worker
         ocr_service.start_async_scale_processing(user_id, job_id, tmp_path, api_key=api_key)
 
         return jsonify({
@@ -352,7 +354,9 @@ def get_scale_upload_status():
     try:
         user_id = request.current_user['id']
         jobs = database.get_active_scale_upload_jobs(user_id)
-        return jsonify({'success': True, 'jobs': jobs})
+        job_dtos = [schemas.ScaleUploadJobItem.model_validate(j) for j in jobs]
+        res = schemas.ScaleUploadStatusResponse(jobs=job_dtos)
+        return jsonify(res.model_dump())
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
 
@@ -376,7 +380,9 @@ def get_entries():
     try:
         user_id = request.current_user['id']
         entries = database.get_all_entries(user_id)
-        return jsonify({'success': True, 'entries': entries})
+        entry_dtos = [schemas.EntryResponse.model_validate(e) for e in entries]
+        response = schemas.EntryListResponse(entries=entry_dtos)
+        return jsonify(response.model_dump())
     except Exception as e:
         app.logger.error(f"Error in get_entries: {traceback.format_exc()}")
         return jsonify({'success': False, 'error': str(e)}), 500
@@ -386,19 +392,23 @@ def get_entries():
 def add_entry():
     try:
         user_id = request.current_user['id']
-        data = request.get_json() or {}
-        date_str = data.get('date')
-        if not date_str:
-            return jsonify({'success': False, 'error': 'Date is required (YYYY-MM-DD)'}), 400
-        
-        weight = float(data['weight']) if data.get('weight') not in (None, '') else None
-        steps = int(data['steps']) if data.get('steps') not in (None, '') else None
-        notes = str(data.get('notes', '')).strip()
+        raw_json = request.get_json() or {}
+        try:
+            req_data = schemas.EntryCreateRequest.model_validate(raw_json)
+        except ValidationError as val_err:
+            first_err = val_err.errors()[0]
+            field = first_err.get('loc', ['field'])[-1]
+            return jsonify({'success': False, 'error': f"{field}: {first_err.get('msg')}"}), 400
 
-        entry = database.upsert_entry(user_id, date_str, weight=weight, steps=steps, notes=notes)
-        return jsonify({'success': True, 'entry': entry}), 201
-    except ValueError as ve:
-        return jsonify({'success': False, 'error': f'Invalid number format: {str(ve)}'}), 400
+        entry = database.upsert_entry(
+            user_id=user_id,
+            date_str=req_data.date,
+            weight=req_data.weight,
+            steps=req_data.steps,
+            notes=req_data.notes or ""
+        )
+        entry_dto = schemas.EntryResponse.model_validate(entry)
+        return jsonify({'success': True, 'entry': entry_dto.model_dump()}), 201
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
 
@@ -407,19 +417,27 @@ def add_entry():
 def update_entry(entry_id):
     try:
         user_id = request.current_user['id']
-        data = request.get_json() or {}
-        date_str = data.get('date')
-        if not date_str:
-            return jsonify({'success': False, 'error': 'Date is required'}), 400
-            
-        weight = float(data['weight']) if data.get('weight') not in (None, '') else None
-        steps = int(data['steps']) if data.get('steps') not in (None, '') else None
-        notes = str(data.get('notes', '')).strip()
+        raw_json = request.get_json() or {}
+        try:
+            req_data = schemas.EntryUpdateRequest.model_validate(raw_json)
+        except ValidationError as val_err:
+            first_err = val_err.errors()[0]
+            field = first_err.get('loc', ['field'])[-1]
+            return jsonify({'success': False, 'error': f"{field}: {first_err.get('msg')}"}), 400
 
-        entry = database.update_entry(user_id, entry_id, date_str, weight=weight, steps=steps, notes=notes)
+        entry = database.update_entry(
+            user_id=user_id,
+            entry_id=entry_id,
+            date_str=req_data.date,
+            weight=req_data.weight,
+            steps=req_data.steps,
+            notes=req_data.notes or ""
+        )
         if not entry:
             return jsonify({'success': False, 'error': 'Entry not found'}), 404
-        return jsonify({'success': True, 'entry': entry})
+        
+        entry_dto = schemas.EntryResponse.model_validate(entry)
+        return jsonify({'success': True, 'entry': entry_dto.model_dump()})
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
 
@@ -442,18 +460,23 @@ def get_goals():
         user_id = request.current_user['id']
         goals = database.get_goals(user_id)
         
-        # Check if user has key or global fallback key exists
         user_key = goals.get('gemini_api_key', '')
         effective_key = user_key or settings.GEMINI_API_KEY
         has_api_key = bool(effective_key)
 
-        response_goals = dict(goals)
-        response_goals['has_gemini_api_key'] = has_api_key
-        # Never send raw plain secret to browser UI, return masked representation
-        response_goals['gemini_api_key_masked'] = secrets_vault.mask_secret(effective_key)
-        response_goals['gemini_api_key'] = user_key # Keep editable if set
-        
-        return jsonify({'success': True, 'goals': response_goals})
+        goal_dto = schemas.GoalResponse(
+            id=goals['id'],
+            user_id=goals['user_id'],
+            daily_steps_goal=goals['daily_steps_goal'],
+            target_weight=goals['target_weight'],
+            starting_weight=goals['starting_weight'],
+            weight_unit=goals['weight_unit'],
+            has_gemini_api_key=has_api_key,
+            gemini_api_key_masked=secrets_vault.mask_secret(effective_key),
+            gemini_api_key=user_key,
+            updated_at=goals.get('updated_at')
+        )
+        return jsonify({'success': True, 'goals': goal_dto.model_dump()})
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
 
@@ -462,29 +485,39 @@ def get_goals():
 def update_goals():
     try:
         user_id = request.current_user['id']
-        data = request.get_json() or {}
-        daily_steps_goal = int(data.get('daily_steps_goal', 10000))
-        target_weight = float(data.get('target_weight', 165.0))
-        starting_weight = float(data.get('starting_weight', 185.0))
-        weight_unit = str(data.get('weight_unit', 'lbs')).strip()
-        gemini_api_key = str(data.get('gemini_api_key', '')).strip()
+        raw_json = request.get_json() or {}
+        try:
+            req_data = schemas.GoalUpdateRequest.model_validate(raw_json)
+        except ValidationError as val_err:
+            first_err = val_err.errors()[0]
+            field = first_err.get('loc', ['field'])[-1]
+            return jsonify({'success': False, 'error': f"{field}: {first_err.get('msg')}"}), 400
 
         goals = database.update_goals(
-            user_id,
-            daily_steps_goal,
-            target_weight,
-            starting_weight,
-            weight_unit,
-            gemini_api_key=gemini_api_key
+            user_id=user_id,
+            daily_steps_goal=req_data.daily_steps_goal,
+            target_weight=req_data.target_weight,
+            starting_weight=req_data.starting_weight,
+            weight_unit=req_data.weight_unit,
+            gemini_api_key=req_data.gemini_api_key or ""
         )
         
         user_key = goals.get('gemini_api_key', '')
         effective_key = user_key or settings.GEMINI_API_KEY
-        response_goals = dict(goals)
-        response_goals['has_gemini_api_key'] = bool(effective_key)
-        response_goals['gemini_api_key_masked'] = secrets_vault.mask_secret(effective_key)
-        
-        return jsonify({'success': True, 'goals': response_goals})
+
+        goal_dto = schemas.GoalResponse(
+            id=goals['id'],
+            user_id=goals['user_id'],
+            daily_steps_goal=goals['daily_steps_goal'],
+            target_weight=goals['target_weight'],
+            starting_weight=goals['starting_weight'],
+            weight_unit=goals['weight_unit'],
+            has_gemini_api_key=bool(effective_key),
+            gemini_api_key_masked=secrets_vault.mask_secret(effective_key),
+            gemini_api_key=user_key,
+            updated_at=goals.get('updated_at')
+        )
+        return jsonify({'success': True, 'goals': goal_dto.model_dump()})
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
 
@@ -502,26 +535,24 @@ def get_stats():
         unit = str(goals.get('weight_unit') or 'lbs')
 
         if not entries:
-            return jsonify({
-                'success': True,
-                'stats': {
-                    'total_days_logged': 0,
-                    'latest_weight': None,
-                    'starting_weight': starting_weight,
-                    'target_weight': target_weight,
-                    'weight_change': 0.0,
-                    'weight_unit': unit,
-                    'progress_percent': 0,
-                    'today_steps': 0,
-                    'today_weight': None,
-                    'avg_steps_7d': 0,
-                    'avg_steps_30d': 0,
-                    'best_step_day': 0,
-                    'total_steps': 0,
-                    'current_step_streak': 0,
-                    'days_goal_met': 0
-                }
-            })
+            stats_dto = schemas.StatsData(
+                total_days_logged=0,
+                latest_weight=None,
+                starting_weight=starting_weight,
+                target_weight=target_weight,
+                weight_change=0.0,
+                weight_unit=unit,
+                progress_percent=0.0,
+                today_steps=0,
+                today_weight=None,
+                avg_steps_7d=0,
+                avg_steps_30d=0,
+                best_step_day=0,
+                total_steps=0,
+                current_step_streak=0,
+                days_goal_met=0
+            )
+            return jsonify(schemas.StatsResponse(stats=stats_dto).model_dump())
 
         weight_entries = [e for e in entries if e.get('weight') is not None]
         latest_weight = float(weight_entries[0]['weight']) if weight_entries else None
@@ -532,13 +563,13 @@ def get_stats():
         today_weight = float(today_entry['weight']) if today_entry and today_entry.get('weight') is not None else None
 
         weight_change = 0.0
-        progress_pct = 0
+        progress_pct = 0.0
         if latest_weight is not None and starting_weight is not None:
             weight_change = round(latest_weight - starting_weight, 1)
             total_needed = starting_weight - target_weight
             if total_needed != 0:
                 actual_lost = starting_weight - latest_weight
-                progress_pct = max(0, min(100, round((actual_lost / total_needed) * 100, 1)))
+                progress_pct = max(0.0, min(100.0, round((actual_lost / total_needed) * 100, 1)))
 
         step_entries = [e for e in entries if e.get('steps') is not None]
         total_steps = sum(int(e['steps']) for e in step_entries)
@@ -563,26 +594,24 @@ def get_stats():
             else:
                 break
 
-        return jsonify({
-            'success': True,
-            'stats': {
-                'total_days_logged': len(entries),
-                'latest_weight': latest_weight,
-                'starting_weight': starting_weight,
-                'target_weight': target_weight,
-                'weight_change': weight_change,
-                'weight_unit': unit,
-                'progress_percent': progress_pct,
-                'today_steps': today_steps,
-                'today_weight': today_weight,
-                'avg_steps_7d': avg_7d,
-                'avg_steps_30d': avg_30d,
-                'best_step_day': best_step_day,
-                'total_steps': total_steps,
-                'current_step_streak': streak,
-                'days_goal_met': days_goal_met
-            }
-        })
+        stats_dto = schemas.StatsData(
+            total_days_logged=len(entries),
+            latest_weight=latest_weight,
+            starting_weight=starting_weight,
+            target_weight=target_weight,
+            weight_change=weight_change,
+            weight_unit=unit,
+            progress_percent=progress_pct,
+            today_steps=today_steps,
+            today_weight=today_weight,
+            avg_steps_7d=avg_7d,
+            avg_steps_30d=avg_30d,
+            best_step_day=best_step_day,
+            total_steps=total_steps,
+            current_step_streak=streak,
+            days_goal_met=days_goal_met
+        )
+        return jsonify(schemas.StatsResponse(stats=stats_dto).model_dump())
     except Exception as e:
         app.logger.error(f"Error in get_stats: {traceback.format_exc()}")
         return jsonify({'success': False, 'error': str(e)}), 500
