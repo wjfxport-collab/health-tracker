@@ -117,11 +117,11 @@ fi
 # Wait briefly for Flask to bind port 5000
 sleep 1.5
 
-# 4. Start Vite React Frontend
+# 4. Start Vite React Frontend (Vite reads ENABLE_SSL from environment)
 cd "$PROJECT_DIR/frontend"
 if [ "$SSL_MODE" = true ]; then
   echo "🔒 Starting Vite React frontend on https://localhost:5173..."
-  npm run dev -- --host --ssl &
+  npm run dev -- --host &
   VITE_PID=$!
 else
   echo "🚀 Starting Vite React frontend on http://localhost:5173..."
