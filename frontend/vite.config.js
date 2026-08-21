@@ -1,24 +1,37 @@
+import fs from 'fs';
+import path from 'path';
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
+
+const certPath = path.resolve(__dirname, '../certs/cert.pem');
+const keyPath = path.resolve(__dirname, '../certs/key.pem');
+const hasLocalCerts = fs.existsSync(certPath) && fs.existsSync(keyPath);
+const isSSL = process.env.ENABLE_SSL === 'true' || process.env.USE_SSL === '1' || process.argv.includes('--ssl');
+
+const backendTarget = process.env.VITE_BACKEND_URL || (isSSL ? 'https://127.0.0.1:5000' : 'http://127.0.0.1:5000');
 
 export default defineConfig({
   plugins: [react()],
   server: {
     port: 5173,
     host: true,
+    https: (isSSL && hasLocalCerts) ? {
+      key: fs.readFileSync(keyPath),
+      cert: fs.readFileSync(certPath)
+    } : false,
     proxy: {
       '/api': {
-        target: process.env.VITE_BACKEND_URL || 'http://127.0.0.1:5000',
+        target: backendTarget,
         changeOrigin: true,
-        secure: false,
+        secure: false, // Accepts self-signed certs without throwing validation errors
         configure: (proxy, _options) => {
           proxy.on('error', (err, _req, res) => {
-            console.error('[Vite Proxy Error]: Failed to connect to backend at http://127.0.0.1:5000:', err.message);
+            console.error(`[Vite Proxy Error]: Failed to connect to backend at ${backendTarget}:`, err.message);
             if (res.writeHead && !res.headersSent) {
               res.writeHead(502, { 'Content-Type': 'application/json' });
               res.end(JSON.stringify({
                 success: false,
-                error: 'Cannot connect to Python Flask backend. Please make sure backend/app.py is running on port 5000.'
+                error: `Cannot connect to Python Flask backend at ${backendTarget}.`
               }));
             }
           });

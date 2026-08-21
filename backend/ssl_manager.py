@@ -1,4 +1,5 @@
 import os
+import socket
 import datetime
 from cryptography import x509
 from cryptography.x509.oid import NameOID
@@ -12,6 +13,19 @@ CERTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'cert
 def ensure_certs_dir():
     os.makedirs(CERTS_DIR, exist_ok=True)
     return CERTS_DIR
+
+def get_local_lan_ip():
+    """Attempt to detect machine's primary local LAN IP address."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        # Doesn't actually send packets
+        s.connect(('10.255.255.255', 1))
+        ip = s.getsockname()[0]
+    except Exception:
+        ip = '127.0.0.1'
+    finally:
+        s.close()
+    return ip
 
 def get_ssl_cert_paths():
     """
@@ -39,6 +53,8 @@ def generate_self_signed_cert(hostname="localhost"):
     cert_path = os.path.join(CERTS_DIR, 'cert.pem')
     key_path = os.path.join(CERTS_DIR, 'key.pem')
 
+    lan_ip = get_local_lan_ip()
+
     # Generate Private Key
     private_key = rsa.generate_private_key(
         public_exponent=65537,
@@ -58,6 +74,11 @@ def generate_self_signed_cert(hostname="localhost"):
         x509.DNSName("localhost"),
         x509.IPAddress(ipaddress.IPv4Address("127.0.0.1")),
     ]
+    if lan_ip and lan_ip != "127.0.0.1":
+        try:
+            alt_names.append(x509.IPAddress(ipaddress.IPv4Address(lan_ip)))
+        except Exception:
+            pass
 
     cert = (
         x509.CertificateBuilder()
@@ -90,6 +111,8 @@ def generate_self_signed_cert(hostname="localhost"):
 
     print(f"✅ Generated SSL Certificate: {cert_path}")
     print(f"✅ Generated Private Key: {key_path}")
+    if lan_ip != "127.0.0.1":
+        print(f"✅ Included Local LAN IP in Certificate: {lan_ip}")
     return cert_path, key_path
 
 if __name__ == '__main__':

@@ -14,9 +14,9 @@ fi
 
 echo "=================================================================="
 if [ "$SSL_MODE" = true ]; then
-  echo " 🔒 Starting HealthPulse with SSL / HTTPS (Port 5000)            "
+  echo " 🔒 Starting HealthPulse in Full HTTPS / SSL Mode                "
 else
-  echo " 🚀 Starting HealthPulse (HTTP Mode - Port 5000)                  "
+  echo " 🚀 Starting HealthPulse (HTTP Mode)                             "
 fi
 echo "=================================================================="
 
@@ -99,10 +99,16 @@ trap cleanup SIGINT SIGTERM EXIT
 
 # 3. Start Flask API Backend
 if [ "$SSL_MODE" = true ]; then
+  export ENABLE_SSL=true
+  export USE_SSL=1
+  export VITE_BACKEND_URL="https://127.0.0.1:5000"
+
   echo "🔒 Starting Flask API backend on https://127.0.0.1:5000..."
   "$VENV_PYTHON" "$PROJECT_DIR/backend/app.py" --ssl &
   FLASK_PID=$!
 else
+  export VITE_BACKEND_URL="http://127.0.0.1:5000"
+
   echo "🚀 Starting Flask API backend on http://127.0.0.1:5000..."
   "$VENV_PYTHON" "$PROJECT_DIR/backend/app.py" &
   FLASK_PID=$!
@@ -112,20 +118,29 @@ fi
 sleep 1.5
 
 # 4. Start Vite React Frontend
-echo "🚀 Starting Vite React frontend on http://localhost:5173..."
 cd "$PROJECT_DIR/frontend"
-npm run dev -- --host &
-VITE_PID=$!
+if [ "$SSL_MODE" = true ]; then
+  echo "🔒 Starting Vite React frontend on https://localhost:5173..."
+  npm run dev -- --host --ssl &
+  VITE_PID=$!
+else
+  echo "🚀 Starting Vite React frontend on http://localhost:5173..."
+  npm run dev -- --host &
+  VITE_PID=$!
+fi
 
 echo ""
 echo "=================================================================="
 echo " 🎉 HealthPulse is LIVE!"
-echo " 👉 Web App:     http://localhost:5173"
 if [ "$SSL_MODE" = true ]; then
-  echo " 👉 Backend API: https://localhost:5000 (SSL Active)"
+  echo " 👉 Web App:     https://localhost:5173 (HTTPS Active)"
+  echo " 👉 Backend API: https://localhost:5000 (HTTPS Active)"
+  echo " ℹ️ Note: If browser shows 'Not Secure / Self-Signed Warning',"
+  echo "          click 'Advanced' -> 'Proceed to localhost (unsafe)' once."
 else
+  echo " 👉 Web App:     http://localhost:5173"
   echo " 👉 Backend API: http://localhost:5000"
-  echo " 💡 Tip: Run './run.sh --ssl' to start with HTTPS / SSL"
+  echo " 💡 Tip: Run './run.sh --ssl' to start in HTTPS mode"
 fi
 echo " Press Ctrl+C to stop all servers."
 echo "=================================================================="
