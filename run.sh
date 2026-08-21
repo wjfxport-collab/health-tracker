@@ -4,8 +4,20 @@ set -e
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$PROJECT_DIR"
 
+SSL_MODE=false
+SSL_FLAG=""
+
+if [ "$1" == "--ssl" ] || [ "$1" == "--https" ]; then
+  SSL_MODE=true
+  SSL_FLAG="--ssl"
+fi
+
 echo "=================================================================="
-echo " Starting HealthPulse (Multi-User, Biometrics, Async Gemini)     "
+if [ "$SSL_MODE" = true ]; then
+  echo " 🔒 Starting HealthPulse with SSL / HTTPS (Port 5000)            "
+else
+  echo " 🚀 Starting HealthPulse (HTTP Mode - Port 5000)                  "
+fi
 echo "=================================================================="
 
 # Ensure previous stale processes on ports 5000 and 5173 are stopped cleanly
@@ -86,9 +98,15 @@ cleanup() {
 trap cleanup SIGINT SIGTERM EXIT
 
 # 3. Start Flask API Backend
-echo "🚀 Starting Flask API backend on http://127.0.0.1:5000..."
-"$VENV_PYTHON" "$PROJECT_DIR/backend/app.py" &
-FLASK_PID=$!
+if [ "$SSL_MODE" = true ]; then
+  echo "🔒 Starting Flask API backend on https://127.0.0.1:5000..."
+  "$VENV_PYTHON" "$PROJECT_DIR/backend/app.py" --ssl &
+  FLASK_PID=$!
+else
+  echo "🚀 Starting Flask API backend on http://127.0.0.1:5000..."
+  "$VENV_PYTHON" "$PROJECT_DIR/backend/app.py" &
+  FLASK_PID=$!
+fi
 
 # Wait briefly for Flask to bind port 5000
 sleep 1.5
@@ -103,7 +121,12 @@ echo ""
 echo "=================================================================="
 echo " 🎉 HealthPulse is LIVE!"
 echo " 👉 Web App:     http://localhost:5173"
-echo " 👉 Backend API: http://localhost:5000"
+if [ "$SSL_MODE" = true ]; then
+  echo " 👉 Backend API: https://localhost:5000 (SSL Active)"
+else
+  echo " 👉 Backend API: http://localhost:5000"
+  echo " 💡 Tip: Run './run.sh --ssl' to start with HTTPS / SSL"
+fi
 echo " Press Ctrl+C to stop all servers."
 echo "=================================================================="
 echo ""
